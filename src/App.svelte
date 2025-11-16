@@ -15,6 +15,7 @@
   import type { TableData } from './agents/store';
   import type { Tab } from './types/tab';
   import { isTauri } from './utils/isTauri';
+  import logo from './assets/logo.png';
 
   let tabs: Tab[] = [];
   let activeTabId: string | null = null;
@@ -568,7 +569,7 @@
   <main class="main-content">
     {#if tabs.length === 0}
       <div class="empty-state">
-        <img src="/logo.png" alt="Jable" class="logo" />
+        <img src={logo} alt="Jable" class="logo" />
         <p>파일을 업로드하거나 데이터를 붙여넣어 시작하세요</p>
       </div>
     {:else}
@@ -686,7 +687,7 @@
 
   .empty-state .logo {
     height: 100px;
-    margin-top: -40px;
+    margin-top: -64px;
   }
 
   .empty-state h2 {
