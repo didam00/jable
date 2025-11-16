@@ -14,6 +14,7 @@
   import { compressToToon, decompressFromToon } from './agents/compression/toon';
   import type { TableData } from './agents/store';
   import type { Tab } from './types/tab';
+  import { isTauri } from './utils/isTauri';
 
   let tabs: Tab[] = [];
   let activeTabId: string | null = null;
@@ -317,7 +318,13 @@
       showProgress = false;
     } catch (error) {
       showProgress = false;
-      alert(`파일 읽기 실패: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      console.error('[handleFileDrop] 파일 읽기 실패:', {
+        error,
+        errorMessage,
+        errorStack: error instanceof Error ? error.stack : undefined
+      });
+      alert(errorMessage);
     }
   }
 
@@ -412,11 +419,20 @@
     event.stopPropagation();
     isDragging = false;
 
+    console.log('[handleDrop] 드롭 이벤트 발생:', {
+      isTauri: isTauri(),
+      filesLength: event.dataTransfer?.files?.length,
+      itemsLength: event.dataTransfer?.items?.length
+    });
+
+    // Tauri와 웹 모두에서 dataTransfer.files를 먼저 시도
     const files = event.dataTransfer?.files;
     if (files && files.length > 0) {
+      console.log('[handleDrop] dataTransfer.files 사용:', files.length);
       // 여러 파일을 동시에 드롭한 경우 모두 처리
       for (const file of Array.from(files)) {
         const fileName = file.name.toLowerCase();
+        console.log('[handleDrop] 파일 처리:', { name: file.name, size: file.size });
         if (fileName.endsWith('.json') || fileName.endsWith('.csv') || fileName.endsWith('.xml') || fileName.endsWith('.toon')) {
           try {
             showProgress = true;
@@ -437,9 +453,83 @@
             showProgress = false;
           } catch (error) {
             showProgress = false;
-            alert(`파일 읽기 실패 (${file.name}): ${error instanceof Error ? error.message : 'Unknown error'}`);
+            const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+            console.error('[handleDrop] 파일 읽기 실패:', {
+              fileName: file.name,
+              error,
+              errorMessage,
+              errorStack: error instanceof Error ? error.stack : undefined
+            });
+            alert(`${file.name}: ${errorMessage}`);
           }
         }
+      }
+    } else if (isTauri()) {
+      // Tauri 환경에서 files가 비어있으면 dataTransfer.items를 통해 파일 경로 추출 시도
+      console.log('[handleDrop] Tauri 환경에서 items 사용 시도');
+      const items = event.dataTransfer?.items;
+      if (items && items.length > 0) {
+        console.log('[handleDrop] items 개수:', items.length);
+        for (let i = 0; i < items.length; i++) {
+          const item = items[i];
+          console.log('[handleDrop] item:', { kind: item.kind, type: item.type });
+          if (item.kind === 'file') {
+            try {
+              // FileSystemEntry API 사용
+              const entry = (item as any).webkitGetAsEntry?.() || (item as any).getAsEntry?.();
+              console.log('[handleDrop] entry:', entry);
+              
+              if (entry && entry.isFile) {
+                const file = await new Promise<File>((resolve, reject) => {
+                  (entry as FileSystemFileEntry).file(resolve, reject);
+                });
+                
+                console.log('[handleDrop] File 객체 생성:', { name: file.name, size: file.size });
+                
+                const fileName = file.name.toLowerCase();
+                if (fileName.endsWith('.json') || fileName.endsWith('.csv') || fileName.endsWith('.xml') || fileName.endsWith('.toon')) {
+                  try {
+                    showProgress = true;
+                    progress = 0;
+                    progressMessage = `${file.name} 읽는 중...`;
+                    
+                    const result = await importFile(file, (prog, msg) => {
+                      progress = prog;
+                      progressMessage = `${file.name}: ${msg}`;
+                    });
+                    
+                    createNewTab(file, result.data, result.format);
+                    if (i === items.length - 1) {
+                      switchToTab(activeTabId!);
+                    }
+                    
+                    showProgress = false;
+                  } catch (error) {
+                    showProgress = false;
+                    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+                    console.error('[handleDrop] 파일 읽기 실패:', {
+                      fileName: file.name,
+                      error,
+                      errorMessage,
+                      errorStack: error instanceof Error ? error.stack : undefined
+                    });
+                    alert(`${file.name}: ${errorMessage}`);
+                  }
+                }
+              } else {
+                console.warn('[handleDrop] entry가 파일이 아님:', entry);
+              }
+            } catch (error) {
+              console.error('[handleDrop] 파일 항목 처리 실패:', {
+                error,
+                errorMessage: error instanceof Error ? error.message : String(error),
+                errorStack: error instanceof Error ? error.stack : undefined
+              });
+            }
+          }
+        }
+      } else {
+        console.warn('[handleDrop] Tauri에서 files와 items 모두 비어있음');
       }
     }
   }
@@ -478,7 +568,7 @@
   <main class="main-content">
     {#if tabs.length === 0}
       <div class="empty-state">
-        <h2>JSON Table Editor</h2>
+        <img src="/logo.png" alt="Jable" class="logo" />
         <p>파일을 업로드하거나 데이터를 붙여넣어 시작하세요</p>
       </div>
     {:else}
@@ -594,6 +684,11 @@
     color: var(--text-secondary);
   }
 
+  .empty-state .logo {
+    height: 100px;
+    margin-top: -40px;
+  }
+
   .empty-state h2 {
     font-size: 2rem;
     font-weight: 600;
@@ -602,7 +697,8 @@
   }
 
   .empty-state p {
-    font-size: 1rem;
+    font-size: 0.875rem;
+    margin-top: -0.25rem;
   }
 
   .shortcuts {

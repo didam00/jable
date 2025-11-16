@@ -36,17 +36,35 @@
           }],
         });
 
+        console.log('[handleFileOpen] Tauri dialog 반환값:', selected);
+
         if (selected) {
+          // Tauri v2에서는 배열 또는 단일 값으로 반환될 수 있음
           const files = Array.isArray(selected) ? selected : [selected];
+          console.log('[handleFileOpen] 처리할 파일들:', files);
+          
           for (const file of files) {
+            // Tauri v2에서는 문자열 경로 또는 객체일 수 있음
+            let filePath: string;
+            let fileName: string;
+            
             if (typeof file === 'string') {
-              // Tauri file path
-              const fileName = file.split(/[/\\]/).pop() || 'unknown';
-              dispatch('newTab', { path: file, name: fileName });
+              filePath = file;
+              fileName = file.split(/[/\\]/).pop() || 'unknown';
+            } else if (file && typeof file === 'object' && 'path' in file) {
+              filePath = (file as any).path;
+              fileName = (file as any).name || filePath.split(/[/\\]/).pop() || 'unknown';
+            } else {
+              console.error('[handleFileOpen] 알 수 없는 파일 형식:', file);
+              continue;
             }
+            
+            console.log('[handleFileOpen] 파일 처리:', { filePath, fileName });
+            dispatch('newTab', { path: filePath, name: fileName });
           }
         }
       } catch (error) {
+        console.error('[handleFileOpen] 파일 열기 실패:', error);
         alert(`파일 열기 실패: ${error instanceof Error ? error.message : 'Unknown error'}`);
       }
     } else {

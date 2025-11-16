@@ -29,13 +29,48 @@ export async function importFile(
         total: 0,
         stageProgress: 0,
       });
-      const fsModule = await import('@tauri-apps/plugin-fs');
-      const { readTextFile, stat } = fsModule as any;
-      const fileStat = await stat(file.path);
-      fileSize = fileStat.size || 0;
       
-      // 파일 크기가 큰 경우 청크 단위로 읽기 시도 (Tauri는 한 번에 읽기만 지원)
-      content = await readTextFile(file.path);
+      // Tauri v2 fs 플러그인 import
+      const fsModule = await import('@tauri-apps/plugin-fs');
+      
+      // 파일 경로 확인
+      if (!file.path || typeof file.path !== 'string') {
+        throw new Error('파일 경로가 유효하지 않습니다.');
+      }
+      
+      // Tauri v2 API 사용: readTextFile은 직접 export됨
+      const { readTextFile } = fsModule as {
+        readTextFile: (path: string) => Promise<string>;
+      };
+      
+      // 파일 경로 정규화 (Windows 경로 처리)
+      let normalizedPath = file.path;
+      // Windows 경로의 경우 백슬래시를 그대로 사용 (Tauri가 처리)
+      console.log('[importFile] 파일 경로:', normalizedPath);
+      
+      // 파일 읽기 (stat 없이 바로 읽기 시도 - 파일이 없으면 readTextFile에서 에러 발생)
+      try {
+        content = await readTextFile(normalizedPath);
+        fileSize = content.length; // 읽은 내용의 길이로 파일 크기 추정
+        console.log('[importFile] 파일 읽기 성공:', { path: normalizedPath, contentLength: content.length });
+      } catch (readError) {
+        console.error('[importFile] 파일 읽기 실패:', {
+          path: normalizedPath,
+          originalPath: file.path,
+          fileName: file.name,
+          error: readError,
+          errorMessage: readError instanceof Error ? readError.message : String(readError),
+          errorStack: readError instanceof Error ? readError.stack : undefined,
+          fsModuleKeys: Object.keys(fsModule)
+        });
+        
+        // 에러 메시지에서 파일을 찾을 수 없다는 것을 확인
+        const errorMessage = readError instanceof Error ? readError.message : String(readError);
+        if (errorMessage.includes('not found') || errorMessage.includes('No such file') || errorMessage.includes('not allowed')) {
+          throw new Error(`파일을 찾을 수 없거나 접근할 수 없습니다: ${normalizedPath}`);
+        }
+        throw new Error(`파일을 읽을 수 없습니다: ${errorMessage}`);
+      }
       
       onProgress?.(20, '파일 읽기 완료', {
         stage: 'loading',
@@ -45,6 +80,10 @@ export async function importFile(
       });
       fileName = file.name;
     } catch (error) {
+      // 에러 메시지가 이미 포함되어 있으면 그대로 사용, 아니면 감싸기
+      if (error instanceof Error && error.message.includes('파일을')) {
+        throw error;
+      }
       throw new Error(`파일 읽기 실패: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   } else if (file instanceof File) {
