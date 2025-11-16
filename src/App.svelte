@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import { dataStore } from './agents/store';
   import { setupKeyboardShortcuts } from './agents/ui-ux';
-  import { importFile } from './agents/import-export';
+  import { importFile, saveFile, saveFileAs } from './agents/import-export';
   import TableView from './components/TableView.svelte';
   import Toolbar from './components/Toolbar.svelte';
   // import SearchBar from './components/SearchBar.svelte';
@@ -55,19 +55,39 @@
       onToggleView: () => {
         viewMode = viewMode === 'table' ? 'raw' : 'table';
       },
+      onSave: () => {
+        handleSave();
+      },
     });
 
     return cleanup;
   });
 
-  function createNewTab(file: File, fileData: TableData): string {
+  function createNewTab(
+    file: File | { path: string; name: string },
+    fileData: TableData,
+    fileFormat?: 'json' | 'csv' | 'xml'
+  ): string {
     const tabId = `tab_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    const fileName = file instanceof File ? file.name : file.name;
+    
+    // 파일 형식 감지
+    let format: 'json' | 'csv' | 'xml' | undefined = fileFormat;
+    if (!format) {
+      const lowerName = fileName.toLowerCase();
+      if (lowerName.endsWith('.json')) format = 'json';
+      else if (lowerName.endsWith('.csv')) format = 'csv';
+      else if (lowerName.endsWith('.xml')) format = 'xml';
+    }
+    
     const newTab: Tab = {
       id: tabId,
-      name: file.name,
+      name: fileName,
       data: JSON.parse(JSON.stringify(fileData)),
       isModified: false,
       file: file,
+      filePath: file instanceof File ? undefined : file.path,
+      fileFormat: format,
     };
     
     tabs = [...tabs, newTab];
@@ -87,9 +107,24 @@
     }, 0);
   }
 
-  function closeTab(tabId: string) {
+  async function closeTab(tabId: string) {
     const tabIndex = tabs.findIndex(t => t.id === tabId);
     if (tabIndex === -1) return;
+    
+    const tab = tabs[tabIndex];
+    
+    // 수정된 파일이 있으면 저장 확인
+    if (tab.isModified) {
+      const shouldSave = confirm(`${tab.name} 파일이 수정되었습니다. 저장하시겠습니까?`);
+      if (shouldSave) {
+        await handleSave();
+        // 저장 후 탭이 아직 수정 상태라면 닫기 취소
+        const updatedTab = tabs.find(t => t.id === tabId);
+        if (updatedTab?.isModified) {
+          return; // 저장이 취소되었거나 실패한 경우
+        }
+      }
+    }
     
     tabs = tabs.filter(t => t.id !== tabId);
     
@@ -115,14 +150,68 @@
     }
   }
 
-  async function handleFileDrop(file: File) {
+  async function handleFileDrop(file: File | { path: string; name: string }) {
     try {
-      const newData = await importFile(file);
+      const result = await importFile(file);
       // 항상 새 탭으로 열기
-      createNewTab(file, newData);
+      createNewTab(file, result.data, result.format);
       switchToTab(activeTabId!);
     } catch (error) {
       alert(`파일 읽기 실패: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+  }
+
+  async function handleSave() {
+    if (!activeTabId) return;
+
+    const tab = tabs.find(t => t.id === activeTabId);
+    if (!tab) return;
+
+    try {
+      if (tab.filePath && tab.fileFormat) {
+        // 원본 파일에 저장
+        const result = await saveFile(tab.data, tab.filePath, tab.fileFormat);
+        if (result.saved) {
+          tab.isModified = false;
+          tabs = tabs; // Svelte reactivity
+        }
+      } else {
+        // Save As
+        const format = tab.fileFormat || 'json';
+        const result = await saveFileAs(tab.data, format, tab.name);
+        if (result.saved && result.filePath) {
+          tab.filePath = result.filePath;
+          tab.isModified = false;
+          // 파일명 업데이트
+          const fileName = result.filePath.split(/[/\\]/).pop() || tab.name;
+          tab.name = fileName;
+          tabs = tabs; // Svelte reactivity
+        }
+      }
+    } catch (error) {
+      alert(`저장 실패: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+  }
+
+  async function handleSaveAs() {
+    if (!activeTabId) return;
+
+    const tab = tabs.find(t => t.id === activeTabId);
+    if (!tab) return;
+
+    try {
+      const format = tab.fileFormat || 'json';
+      const result = await saveFileAs(tab.data, format, tab.name);
+      if (result.saved && result.filePath) {
+        tab.filePath = result.filePath;
+        tab.isModified = false;
+        // 파일명 업데이트
+        const fileName = result.filePath.split(/[/\\]/).pop() || tab.name;
+        tab.name = fileName;
+        tabs = tabs; // Svelte reactivity
+      }
+    } catch (error) {
+      alert(`저장 실패: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   }
 
@@ -150,8 +239,8 @@
         const fileName = file.name.toLowerCase();
         if (fileName.endsWith('.json') || fileName.endsWith('.csv') || fileName.endsWith('.xml')) {
           try {
-            const newData = await importFile(file);
-            createNewTab(file, newData);
+            const result = await importFile(file);
+            createNewTab(file, result.data, result.format);
             if (file === files[files.length - 1]) {
               // 마지막 파일을 활성 탭으로 설정
               switchToTab(activeTabId!);
@@ -174,7 +263,11 @@
   on:drop={handleDrop}
 >
   <Toolbar 
-    on:newTab={(e) => handleFileDrop(e.detail)}
+    on:newTab={(e) => {
+      handleFileDrop(e.detail);
+    }}
+    on:save={handleSave}
+    on:saveAs={handleSaveAs}
     on:searchChange={(e) => {
       searchMatchedRowIds = e.detail.matchedRowIds;
       searchFilteredColumnKeys = e.detail.filteredColumnKeys;
@@ -193,14 +286,6 @@
       <div class="empty-state">
         <h2>JSON Table Editor</h2>
         <p>파일을 업로드하거나 데이터를 붙여넣어 시작하세요</p>
-        <div class="shortcuts">
-          <p>단축키:</p>
-          <ul>
-            <li>Ctrl+Z: 실행 취소</li>
-            <li>Ctrl+Y: 다시 실행</li>
-            <li>Ctrl+E: 뷰 전환</li>
-          </ul>
-        </div>
       </div>
     {:else}
       <div class="stats-controls-container">

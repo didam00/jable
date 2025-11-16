@@ -1,3 +1,4 @@
+![logo](./logo.png)
 # JSON Table Editor
 
 JSON 데이터를 엑셀처럼 편리하게 편집할 수 있는 웹 애플리케이션입니다.

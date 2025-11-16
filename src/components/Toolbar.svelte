@@ -2,10 +2,13 @@
   import { createEventDispatcher } from 'svelte';
   import { dataStore } from '../agents/store';
   import { importFromClipboard, exportFile } from '../agents/import-export';
+  import { isTauri } from '../utils/isTauri';
   import SearchBar from './SearchBar.svelte';
 
   const dispatch = createEventDispatcher<{
-    newTab: File;
+    newTab: File | { path: string; name: string };
+    save: void;
+    saveAs: void;
     searchChange: { matchedRowIds: Set<string>; filteredColumnKeys: string[] | null };
   }>();
 
@@ -17,6 +20,38 @@
     canUndo = dataStore.canUndo();
     canRedo = dataStore.canRedo();
   });
+
+  async function handleFileOpen() {
+    if (isTauri()) {
+      try {
+        // @ts-expect-error - Tauri plugin types may not be available at compile time
+        const dialogModule = await import('@tauri-apps/plugin-dialog');
+        const { open } = dialogModule as any;
+        const selected = await open({
+          multiple: true,
+          filters: [{
+            name: 'Data Files',
+            extensions: ['json', 'csv', 'xml'],
+          }],
+        });
+
+        if (selected) {
+          const files = Array.isArray(selected) ? selected : [selected];
+          for (const file of files) {
+            if (typeof file === 'string') {
+              // Tauri file path
+              const fileName = file.split(/[/\\]/).pop() || 'unknown';
+              dispatch('newTab', { path: file, name: fileName });
+            }
+          }
+        }
+      } catch (error) {
+        alert(`파일 열기 실패: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      }
+    } else {
+      fileInput?.click();
+    }
+  }
 
   async function handleFileUpload(event: Event) {
     const target = event.target as HTMLInputElement;
@@ -40,9 +75,13 @@
     }
   }
 
-  function handleExport(format: 'json' | 'csv' | 'xml') {
-    dataStore.subscribe((data) => {
-      exportFile(data, format);
+  async function handleExport(format: 'json' | 'csv' | 'xml') {
+    dataStore.subscribe(async (data) => {
+      try {
+        await exportFile(data, format);
+      } catch (error) {
+        alert(`내보내기 실패: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      }
     })();
   }
 
@@ -57,18 +96,27 @@
 
 <header class="toolbar">
   <div class="toolbar-left">
-    <button class="btn-icon" on:click={() => fileInput?.click()} title="파일 열기">
+    <button class="btn-icon" on:click={handleFileOpen} title="파일 열기">
       <span class="material-icons">folder_open</span>
     </button>
-    <input
-      bind:this={fileInput}
-      type="file"
-      accept=".json,.csv,.xml"
-      on:change={handleFileUpload}
-      style="display: none;"
-    />
+    {#if !isTauri()}
+      <input
+        bind:this={fileInput}
+        type="file"
+        accept=".json,.csv,.xml"
+        on:change={handleFileUpload}
+        style="display: none;"
+      />
+    {/if}
     <button class="btn-icon" on:click={handlePaste} title="붙여넣기">
       <span class="material-icons">content_paste</span>
+    </button>
+    <div class="divider"></div>
+    <button class="btn-icon" on:click={() => dispatch('save')} title="저장 (Ctrl+S)">
+      <span class="material-icons">save</span>
+    </button>
+    <button class="btn-icon" on:click={() => dispatch('saveAs')} title="다른 이름으로 저장">
+      <span class="material-icons">save_as</span>
     </button>
     <div class="divider"></div>
     <button class="btn-icon" on:click={handleUndo} disabled={!canUndo} title="실행 취소 (Ctrl+Z)">
