@@ -5,6 +5,10 @@ import { svelte } from '@sveltejs/vite-plugin-svelte';
 export default defineConfig({
   plugins: [svelte()],
 
+  // GitHub Pages를 위한 base URL 설정
+  // 환경 변수가 없으면 기본값 '/' (로컬 개발용)
+  base: process.env.VITE_BASE_URL || '/',
+
   // Vite options tailored for Tauri development
   clearScreen: false,
   // to make use of `TAURI_DEBUG` and other env variables
