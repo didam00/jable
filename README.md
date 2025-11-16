@@ -227,7 +227,7 @@ price>10&price<100
 ### 🔄 변환 모드
 
 #### 1️⃣ 단일 값 변환 모드
-각 셀을 개별적으로 변환합니다. `value` 변수를 사용합니다.
+각 셀을 개별적으로 변환합니다. `a` 변수를 사용합니다.
 
 **특징:**
 - 같은 행의 다른 열 값은 `$column-name` 형식으로 참조 가능
@@ -237,23 +237,23 @@ price>10&price<100
 **예제:**
 ```javascript
 // 한 줄: return 생략 가능
-value * 2
+a * 2
 
 // 다른 열 값 참조 ($column-name 형식)
-value + $price * 0.1
+a + $price * 0.1
 
 // 여러 줄: return 필요
-if (typeof value === "number") {
-  return value * 2;
+if (typeof a === "number") {
+  return a * 2;
 } else {
-  return value;
+  return a;
 }
 
 // 같은 행의 여러 열 값 사용
 $firstName + " " + $lastName
 
 // 조건부 변환
-value > 100 ? value * 0.9 : value
+a > 100 ? a * 0.9 : a
 ```
 
 #### 2️⃣ 배열 변환 모드
@@ -322,6 +322,78 @@ list.map((val) => {
 배열 변환 모드에서 리턴값 형식이 맞지 않으면 자동으로 오류 메시지가 표시됩니다:
 - 단일 열: `타입[]` 형식으로 주세요
 - 여러 열: `{col1: 타입, col2: 타입}[]` 형식으로 주세요
+
+### 🗑️ 행 삭제 기능
+
+**단일 값 변환 모드:**
+`return;` 또는 `return undefined;`를 사용하여 조건에 맞는 행을 삭제할 수 있습니다.
+
+```javascript
+// 10 미만인 행 삭제
+if (a < 10) {
+  return;
+}
+
+// 결측값(null) 삭제
+if (a === null) {
+  return;
+}
+
+// 조건부 삭제 및 변환
+if (a < 0) {
+  return;  // 삭제
+} else {
+  return a * 2;  // 변환
+}
+```
+
+**배열 변환 모드:**
+`void` 또는 `undefined` 반환으로 행을 삭제할 수 있습니다.
+
+```javascript
+// 조건에 맞는 행 삭제 (void/undefined 반환)
+list.map((val, idx) => {
+  if (val < 10) {
+    return void 0;  // 또는 undefined
+  }
+  return val;
+})
+
+// 또는 직접 undefined 반환
+list.map(v => v < 10 ? void 0 : v)
+```
+
+### 🔄 반환값 처리
+
+- **단일 값 모드**:
+  - `return;` 또는 `return undefined;`: 행 삭제
+  - 반환값 없음: 기존값 유지
+  - 반환값 있음: 새로운 값으로 업데이트
+- **배열 모드**:
+  - `void`, `undefined` 반환: 해당 행 삭제
+  - 유효한 값 반환: 해당 값으로 업데이트
+
+### 📦 Null 값 처리
+
+빈 값은 `null`로 저장됩니다:
+- `column=null`: 비어있는 값 (결측값)
+- `column="null"`: 문자열 'null'
+- 검색/필터링에서 `column=null`은 비어있는 값을 의미
+- 함수에서 `if (a === null) { return; }`로 결측값 삭제 가능
+
+**예제:**
+```javascript
+// 결측값 삭제 (단일 값 모드)
+if (a === null || a === '') {
+  return;
+}
+
+// 결측값을 기본값으로 대체
+a === null ? 0 : a
+
+// 결측값만 필터링하여 삭제 (배열 모드)
+list.map(v => v === null ? void 0 : v)
+```
 
 ### 👁️ 미리보기
 

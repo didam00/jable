@@ -24,14 +24,30 @@ const DANGEROUS_PATTERNS = [
   /\bprocess\b/,
   /\bglobal\b/,
   /\bthis\b/,
+  /\balert\b/,
+  /\bconfirm\b/,
+  /\bprompt\b/,
+  /\bopen\b/,
+  /\bclose\b/,
+  /\bwrite\b/,
+  /\bwriteln\b/,
+  /\bprint\b/,
+  /\bprintln\b/,
+  /\bconsole\b/,
+  /\bprint\b/,
 ];
 
 const MAX_EXECUTION_TIME = 1000; // 1초
+
+export const DELETE_MARKER = Symbol('DELETE_ROW');
+export const ARRAY_DELETE_INDEXES = Symbol('ARRAY_DELETE_INDEXES');
 
 export interface ExecutionResult {
   success: boolean;
   result?: any;
   error?: string;
+  isDelete?: boolean; // 단일 값 모드에서 행 삭제 표시
+  deletedIndexes?: number[]; // 배열 모드에서 삭제된 인덱스
 }
 
 export type TransformMode = 'single' | 'array';
@@ -163,7 +179,7 @@ export function executeFunction(
   const executionPromise = new Promise<ExecutionResult>((resolve) => {
     try {
       // Function 생성자 사용 (eval보다 안전)
-      const func = new Function('value', code);
+      const func = new Function('a', code);
       
       // 실행
       const result = func(value);
@@ -267,9 +283,29 @@ export function executeFunctionSync(
     if (mode === 'array') {
       // 배열 변환 모드: list 변수 제공
       const list = Array.isArray(value) ? value : [value];
-      const func = new Function('list', normalizedCode);
-      const result = func(list);
-
+      
+      // 배열 변환 모드: void나 undefined 반환 시 해당 인덱스 행 삭제
+      let processedCode = normalizedCode;
+      const deletedIndexes: number[] = [];
+      
+      const func = new Function('list', processedCode);
+      let result = func(list);
+      
+      // undefined나 void가 포함된 배열인 경우 필터링
+      if (Array.isArray(result)) {
+        const filtered: any[] = [];
+        result.forEach((item, idx) => {
+          // undefined나 void인 경우 삭제 (배열 변환에서 void나 undefined 반환 시 해당 행 삭제)
+          if (item !== undefined && item !== void 0) {
+            filtered.push(item);
+          } else {
+            // 삭제된 항목은 deletedIndexes에 인덱스로 추가
+            deletedIndexes.push(idx);
+          }
+        });
+        result = filtered;
+      }
+      
       // 리턴값 검증
       const validation = validateArrayResult(
         result,
@@ -287,6 +323,7 @@ export function executeFunctionSync(
       return {
         success: true,
         result,
+        deletedIndexes: deletedIndexes.length > 0 ? deletedIndexes : undefined,
       };
     } else {
       // 단일 값 변환 모드
@@ -316,8 +353,34 @@ export function executeFunctionSync(
         );
       });
       
-      const func = new Function('value', processedCode);
+      // 단일 값 변환 모드: return; (명시적으로 undefined 반환) 시 행 삭제
+      // return이 없으면 기존값 유지
+      let finalCode = processedCode;
+      
+      // return 키워드가 있는지 확인 (명시적 반환 여부)
+      const hasExplicitReturn = /\breturn\b/.test(finalCode);
+      
+      const func = new Function('a', finalCode);
       const result = func(value);
+      
+      // 명시적으로 return이 있고 결과가 undefined면 행 삭제
+      // (return; 또는 return undefined; 같은 경우)
+      if (hasExplicitReturn && result === undefined) {
+        return {
+          success: true,
+          result: DELETE_MARKER,
+          isDelete: true,
+        };
+      }
+      
+      // return이 없고 결과가 undefined면 기존값 유지
+      if (!hasExplicitReturn && result === undefined) {
+        return {
+          success: true,
+          result: originalValue,
+        };
+      }
+      
       const preserved = originalValue !== undefined 
         ? preserveType(originalValue, result)
         : result;

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { executeFunctionSync, type TransformMode } from '../utils/safeFunctionExecutor';
+  import { executeFunctionSync, type TransformMode, DELETE_MARKER } from '../utils/safeFunctionExecutor';
   import type { TableData } from '../agents/store';
 
   export let show: boolean = false;
@@ -15,6 +15,8 @@
   let functionCode = '';
   let errorMessage = '';
   let previewResult: { success: boolean; result?: any; error?: string } | null = null;
+  let previewTestValue: string = '';
+  let useCustomPreviewValue: boolean = false;
 
 
   function toggleColumn(columnKey: string) {
@@ -41,8 +43,9 @@
     }
 
     if (transformMode === 'array') {
-      // 배열 변환 모드: 모든 행의 값을 배열로 수집
-      const allValues = data.rows.slice(0, 5).map((row) => {
+      // 배열 변환 모드: 모든 행의 값을 배열로 수집 (미리보기는 처음 5개만)
+      const previewRowCount = Math.min(5, data.rows.length);
+      const allValues = data.rows.slice(0, previewRowCount).map((row) => {
         if (columns.length === 1) {
           return row.cells[columns[0]]?.value;
         } else {
@@ -60,7 +63,32 @@
         undefined,
         { mode: 'array', columns }
       );
-      previewResult = result;
+      
+      // 배열 모드: 삭제된 인덱스를 '제거됨'으로 표시
+      if (result.success && Array.isArray(result.result)) {
+        const deletedIndexes = result.deletedIndexes || [];
+        const deleteSet = new Set(deletedIndexes);
+        // 원본 배열의 인덱스를 기준으로 미리보기 배열 생성
+        const previewArray = allValues.map((_: any, originalIndex: number) => {
+          if (deleteSet.has(originalIndex)) {
+            return '제거됨';
+          }
+          // result.result는 필터링된 배열이므로, 원본 인덱스에서 삭제된 항목 수를 빼서 매핑
+          let resultIndex = originalIndex;
+          for (let i = 0; i < originalIndex; i++) {
+            if (deleteSet.has(i)) {
+              resultIndex--;
+            }
+          }
+          return result.result[resultIndex];
+        });
+        previewResult = {
+          success: true,
+          result: previewArray
+        };
+      } else {
+        previewResult = result;
+      }
 
       if (!result.success) {
         errorMessage = result.error || '오류가 발생했습니다.';
@@ -68,29 +96,62 @@
     } else {
       // 단일 값 변환 모드
       const firstColumn = columns[0];
-      const firstRow = data.rows[0];
-      const cell = firstRow.cells[firstColumn];
-
-      if (!cell) {
-        errorMessage = '선택된 열에 데이터가 없습니다.';
-        return;
-      }
-
-      // 같은 행의 다른 열 값들을 rowData로 전달
-      const rowData: Record<string, any> = {};
-      data.columns.forEach((col) => {
-        if (col.key !== firstColumn && firstRow.cells[col.key]) {
-          rowData[col.key] = firstRow.cells[col.key].value;
+      
+      // 미리보기 테스트 값 결정
+      let testValue: any;
+      if (useCustomPreviewValue && previewTestValue.trim() !== '') {
+        // 사용자 입력 값 사용 (타입 변환 시도)
+        const trimmed = previewTestValue.trim();
+        // 숫자로 변환 시도
+        if (/^-?\d+\.?\d*$/.test(trimmed)) {
+          testValue = trimmed.includes('.') ? parseFloat(trimmed) : parseInt(trimmed, 10);
+        } else if (trimmed === 'null' || trimmed === '') {
+          testValue = null;
+        } else if (trimmed === 'true' || trimmed === 'false') {
+          testValue = trimmed === 'true';
+        } else {
+          testValue = trimmed;
         }
-      });
+      } else {
+        // 기본값 사용 (첫 번째 행의 값)
+        const firstRow = data.rows[0];
+        const cell = firstRow?.cells[firstColumn];
+        
+        if (!cell) {
+          errorMessage = '선택된 열에 데이터가 없습니다.';
+          return;
+        }
+        
+        testValue = cell.value ?? null;
+      }
+      
+      // 같은 행의 다른 열 값들을 rowData로 전달 (사용자 정의 값이 아닌 경우에만)
+      const rowData: Record<string, any> = {};
+      if (!useCustomPreviewValue || previewTestValue.trim() === '') {
+        const firstRow = data.rows[0];
+        data.columns.forEach((col) => {
+          if (col.key !== firstColumn && firstRow?.cells[col.key]) {
+            rowData[col.key] = firstRow.cells[col.key].value ?? null;
+          }
+        });
+      }
 
       const result = executeFunctionSync(
         functionCode, 
-        cell.value, 
-        cell.value, 
+        testValue, 
+        testValue, 
         { mode: 'single', rowData }
       );
-      previewResult = result;
+      
+      // 삭제된 경우 '제거됨'으로 표시
+      if (result.success && (result.isDelete || result.result === DELETE_MARKER)) {
+        previewResult = {
+          success: true,
+          result: '제거됨'
+        };
+      } else {
+        previewResult = result;
+      }
 
       if (!result.success) {
         errorMessage = result.error || '오류가 발생했습니다.';
@@ -154,23 +215,70 @@
     validateAndPreview();
   }
 
-  // 다이얼로그 외부 클릭 시 닫기
-  function handleOverlayClick(event: MouseEvent) {
-    if (event.target === event.currentTarget) {
-      handleClose();
+  // 다이얼로그 클릭 전파 방지
+  function handleDialogClick(event: MouseEvent) {
+    event.stopPropagation();
+  }
+
+  // 다이얼로그 키보드 이벤트 전파 방지
+  function handleDialogKeydown(event: KeyboardEvent) {
+    event.stopPropagation();
+  }
+
+  // Tab 키 처리 함수
+  function handleTabKey(e: KeyboardEvent) {
+    if (e.key === 'Tab') {
+      e.preventDefault();
+      const textarea = e.currentTarget as HTMLTextAreaElement;
+      const start = textarea.selectionStart;
+      const end = textarea.selectionEnd;
+      const value = textarea.value;
+      
+      if (e.shiftKey) {
+        // Shift+Tab: 들여쓰기 제거
+        const linesBefore = value.substring(0, start).split('\n');
+        const currentLine = linesBefore[linesBefore.length - 1];
+        if (currentLine.startsWith('  ')) {
+          const newValue = value.substring(0, start - 2) + value.substring(start);
+          functionCode = newValue;
+          setTimeout(() => {
+            textarea.selectionStart = textarea.selectionEnd = start - 2;
+          }, 0);
+        }
+      } else {
+        // Tab: 들여쓰기 추가 (2칸)
+        const newValue = value.substring(0, start) + '  ' + value.substring(end);
+        functionCode = newValue;
+        setTimeout(() => {
+          textarea.selectionStart = textarea.selectionEnd = start + 2;
+        }, 0);
+      }
     }
   }
 
   $: if (functionCode) {
     validateAndPreview();
   }
+
 </script>
 
 {#if show}
-  <div class="dialog-overlay" on:click={handleOverlayClick}>
-    <div class="dialog" on:click|stopPropagation>
+  <div 
+    class="dialog-overlay" 
+    role="presentation"
+    on:keydown={(e) => e.key === 'Escape' && handleClose()}
+  >
+    <div 
+      class="dialog" 
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="dialog-title"
+      tabindex="-1"
+      on:click|stopPropagation={handleDialogClick}
+      on:keydown|stopPropagation={handleDialogKeydown}
+    >
       <div class="dialog-header">
-        <h3>열 변환 함수 적용</h3>
+        <h3 id="dialog-title">열 변환 함수 적용</h3>
         <button class="close-btn" on:click={handleClose} title="닫기">
           <span class="material-icons">close</span>
         </button>
@@ -179,7 +287,7 @@
       <div class="dialog-content">
         <div class="section">
           <div class="section-header">
-            <label class="label">선택된 열 ({Array.from(localSelectedColumns).length}개)</label>
+            <div class="label">선택된 열 ({Array.from(localSelectedColumns).length}개)</div>
             <button class="toggle-selector-btn" on:click={() => (showColumnSelector = !showColumnSelector)}>
               <span class="material-icons">{showColumnSelector ? 'expand_less' : 'expand_more'}</span>
               {showColumnSelector ? '숨기기' : '열 선택'}
@@ -212,22 +320,26 @@
         </div>
 
         <div class="section">
-          <label class="label">변환 모드</label>
+          <div class="label">변환 모드</div>
           <div class="mode-selector">
             <button
               class="mode-btn {transformMode === 'single' ? 'active' : ''}"
               on:click={() => { transformMode = 'single'; validateAndPreview(); }}
             >
-              <span class="material-icons">edit</span>
-              <span>단일 값 변환</span>
-              <span class="mode-desc">각 셀을 개별적으로 변환 (value 변수 사용)</span>
+              <span class="mode-top">
+                <span class="material-icons">edit</span>
+                <span>단일 값 변환</span>
+              </span>
+              <span class="mode-desc">각 셀을 개별적으로 변환 (a 변수 사용)</span>
             </button>
             <button
               class="mode-btn {transformMode === 'array' ? 'active' : ''}"
               on:click={() => { transformMode = 'array'; validateAndPreview(); }}
             >
-              <span class="material-icons">list</span>
-              <span>배열 변환</span>
+              <span class="mode-top">
+                <span class="material-icons">list</span>
+                <span>배열 변환</span>
+              </span>
               <span class="mode-desc">전체 열을 배열로 변환 (list 변수 사용)</span>
             </button>
           </div>
@@ -248,8 +360,9 @@
         </div>
 
         <div class="section">
-          <label class="label">함수 코드</label>
+          <label for="function-code-input" class="label">함수 코드</label>
           <textarea
+            id="function-code-input"
             class="code-input"
             bind:value={functionCode}
             placeholder={
@@ -257,25 +370,67 @@
                 ? Array.from(localSelectedColumns).length === 1
                   ? '예: list.map(val => val * 2)'
                   : `예: list.map((val) => { return {${Array.from(localSelectedColumns).map(c => `${c}: val.${c}`).join(', ')}}; })`
-                : '예: value * 2'
+                : '예: a * 2'
             }
             rows="4"
+            on:keydown={handleTabKey}
           ></textarea>
           <div class="hint">
             <span class="material-icons">info</span>
             <span>
               {#if transformMode === 'array'}
-                <code>list</code> 변수를 사용하여 변환하세요. 리턴값은 배열이어야 합니다.
+                <code>list</code> 변수를 사용하여 변환하세요. 리턴값은 배열이어야 합니다. <code>void</code> 또는 <code>undefined</code> 반환으로 행 삭제 가능.
               {:else}
-                <code>value</code> 변수를 사용하여 변환하세요. 같은 행의 다른 열 값은 <code>$column-name</code> 형식으로 참조할 수 있습니다. 한 줄이면 return 생략 가능, 여러 줄이면 return 필요.
+                <code>a</code> 변수를 사용하여 변환하세요. 같은 행의 다른 열 값은 <code>$column-name</code> 형식으로 참조할 수 있습니다. 한 줄이면 return 생략 가능, 여러 줄이면 return 필요. <code>return;</code> 또는 <code>return undefined;</code>로 행 삭제. 반환값이 없으면 기존값 유지.
               {/if}
             </span>
           </div>
+          <div class="hint" style="margin-top: 0.5rem; padding: 0.75rem; background: var(--bg-secondary); border-radius: 4px;">
+            <span class="material-icons">help_outline</span>
+            <div style="flex: 1;">
+              <div style="font-weight: 600; margin-bottom: 0.25rem;">특수 기능:</div>
+              <div style="font-size: 0.8125rem; line-height: 1.6;">
+                <p>• 단일 값 모드: <code>return;</code> 또는 <code>return undefined;</code>로 행 삭제</p>
+                <p>• 배열 모드: <code>void</code> 또는 <code>undefined</code> 반환으로 행 삭제</p>
+                <p>• 반환값 없음: 기존값 유지 (단일 값 모드)</p>
+                <p>• 빈 값: <code>null</code>로 저장 (<code>column=null</code>은 비어있음, <code>column="null"</code>은 문자열 'null')</p>
+                <p>• 예시: <code>if (a {'<'} 10) {'{'} return; {'}'}</code> - 10 미만인 행 삭제</p>
+                <p>• 예시: <code>if (a === null) {'{'} return; {'}'}</code> - 결측값 삭제</p>
+                <p>• 예시: <code>list.map(v => v {'<'} 10 ? void 0 : v)</code> - 10 미만인 행 삭제 (배열 모드)</p>
+              </div>
+            </div>
+          </div>
         </div>
+
+        {#if transformMode === 'single'}
+          <div class="section">
+            <div style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.5rem;">
+              <input
+                type="checkbox"
+                id="custom-preview-checkbox"
+                bind:checked={useCustomPreviewValue}
+                on:change={validateAndPreview}
+              />
+              <label for="custom-preview-checkbox" class="label" style="margin: 0; cursor: pointer;">
+                테스트 값 직접 입력
+              </label>
+            </div>
+            {#if useCustomPreviewValue}
+              <input
+                type="text"
+                class="code-input"
+                style="width: 100%; padding: 0.5rem; margin-bottom: 0.5rem;"
+                bind:value={previewTestValue}
+                on:input={validateAndPreview}
+                placeholder="테스트할 값을 입력하세요 (예: 20000, null, true)"
+              />
+            {/if}
+          </div>
+        {/if}
 
         {#if previewResult}
           <div class="section">
-            <label class="label">미리보기</label>
+            <div class="label">미리보기</div>
             {#if previewResult.success}
               <div class="preview success">
                 <span class="preview-label">결과:</span>
@@ -290,12 +445,6 @@
           </div>
         {/if}
 
-        {#if errorMessage}
-          <div class="error-message">
-            <span class="material-icons">error</span>
-            <span>{errorMessage}</span>
-          </div>
-        {/if}
       </div>
 
       <div class="dialog-footer">
@@ -492,6 +641,17 @@
     display: flex;
     gap: 0.75rem;
     margin-bottom: 0.75rem;
+    margin-top: 0.25rem;
+  }
+
+  .mode-top {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+
+    & .material-icons {
+      font-size: 1rem !important;
+    }
   }
 
   .mode-btn {
@@ -500,8 +660,7 @@
     flex-direction: column;
     align-items: flex-start;
     gap: 0.5rem;
-    padding: 1rem;
-    border: 2px solid var(--border);
+    padding: 0.75rem 1rem;
     border-radius: 6px;
     background: var(--bg-primary);
     transition: all 0.2s;
@@ -563,7 +722,7 @@
     background: var(--bg-tertiary);
     padding: 0.125rem 0.375rem;
     border-radius: 3px;
-    font-family: 'Courier New', monospace;
+    font-family: 'Cascadia Code', monospace;
     font-size: 0.75rem;
   }
 
@@ -572,11 +731,12 @@
     padding: 0.75rem;
     border: 1px solid var(--border);
     border-radius: 6px;
-    font-family: 'Courier New', monospace;
+    font-family: 'Cascadia Code', monospace;
     font-size: 0.875rem;
     background: var(--bg-primary);
     color: var(--text-primary);
     resize: vertical;
+    margin-top: 0.25rem;
   }
 
   .code-input:focus {
@@ -613,33 +773,18 @@
   }
 
   .preview-label {
-    font-weight: 500;
-    margin-right: 0.5rem;
+    font-weight: 700;
+    /* margin-right: 0.25rem; */
   }
 
   .preview-value {
-    font-family: 'Courier New', monospace;
+    font-family: 'Cascadia Code', monospace;
   }
 
   .preview-error {
     color: var(--error);
   }
 
-  .error-message {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    padding: 0.75rem;
-    background: rgba(255, 59, 48, 0.1);
-    border-radius: 6px;
-    color: var(--error);
-    font-size: 0.875rem;
-    margin-top: 1rem;
-  }
-
-  .error-message .material-icons {
-    font-size: 20px;
-  }
 
   .dialog-footer {
     display: flex;

@@ -3,10 +3,11 @@
   import type { TableData, Row, Column } from '../agents/store';
   import { sortRows } from '../agents/filters';
   import ColumnFilter from './ColumnFilter.svelte';
+  // @ts-ignore - Svelte 컴포넌트는 자동으로 default export를 생성합니다
   import ColumnTransformDialog from './ColumnTransformDialog.svelte';
   import ContextMenu from './ContextMenu.svelte';
   import ImageViewer from './ImageViewer.svelte';
-  import { executeFunctionSync } from '../utils/safeFunctionExecutor';
+  import { executeFunctionSync, DELETE_MARKER } from '../utils/safeFunctionExecutor';
   import { onMount, createEventDispatcher } from 'svelte';
   
   const dispatch = createEventDispatcher();
@@ -21,7 +22,6 @@
   export let searchFilteredColumnKeys: string[] | null = null; // 검색으로 필터링된 열 키들
   
   let scrollLeft = 0;
-  let scrollTop = 0;
   let header: HTMLDivElement;
   let sortColumn: string | null = null;
   let sortDirection: 'asc' | 'desc' = 'asc';
@@ -42,9 +42,16 @@
   let isSelectingColumns = false;
   let selectionStartColumn: string | null = null;
   let lastClickedColumn: string | null = null;
+  let draggingColumn: string | null = null;
+  let dragOverColumn: string | null = null;
+  let dragStartX = 0;
+  let dragCurrentX = 0;
+  let dragColumnElement: HTMLElement | null = null;
+  let dragGhost: HTMLElement | null = null;
+  let dragColumnElementsCache: HTMLElement[] | null = null; // 열 요소 캐시
+  let dragAnimationFrame: number | null = null; // requestAnimationFrame ID
 
   const ROW_HEIGHT = 32;
-  const VISIBLE_ROWS = 25; // 최소 25개 행 표시
   const DEFAULT_COLUMN_WIDTH = 200;
   const ROW_NUMBER_WIDTH = 60;
 
@@ -270,42 +277,18 @@
   function handleScroll(event: Event) {
     const target = event.target as HTMLDivElement;
     scrollLeft = target.scrollLeft;
-    scrollTop = target.scrollTop;
-
     if (header) {
       header.scrollLeft = scrollLeft;
     }
   }
 
-  let visibleRows: Array<Row & { index: number; originalIndex: number }> = [];
-  let tableBodyHeight = 0;
   let tableContainer: HTMLDivElement;
   
-  // 원본 행 인덱스 맵 (성능 최적화)
-  $: originalRowIndexMap = new Map(data.rows.map((row, index) => [row.id, index]));
-  
+  // 원본 행 인덱스 맵 (성능 최적화) - filteredRows가 변경될 때만 업데이트
+  let originalRowIndexMap = new Map<string, number>();
   $: {
-    if (filteredRows.length === 0) {
-      visibleRows = [];
-      tableBodyHeight = 0;
-    } else {
-      const start = Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - 5);
-      const end = Math.min(start + VISIBLE_ROWS + 10, filteredRows.length);
-      const rows = filteredRows.slice(start, end);
-      
-      visibleRows = rows.map((row, index) => {
-        // 원본 데이터에서의 행 인덱스 찾기 (맵에서 빠르게 조회)
-        const originalIndex = originalRowIndexMap.get(row.id) ?? -1;
-        return {
-          ...row,
-          index: start + index, // 필터링된 인덱스 (가상 스크롤링용)
-          originalIndex, // 원본 인덱스
-        };
-      });
-      
-      // 전체 테이블 높이 계산
-      tableBodyHeight = filteredRows.length * ROW_HEIGHT;
-    }
+    // data.rows가 변경될 때만 맵 업데이트
+    originalRowIndexMap = new Map(data.rows.map((row, index) => [row.id, index]));
   }
 
   // 외부에서 호출 가능한 네비게이션 함수
@@ -371,16 +354,32 @@
   }
 
   function updateCell(rowId: string, columnKey: string, value: any) {
+    // 성능 최적화: 현재 값과 같으면 업데이트 스킵
+    const currentRow = data.rows.find((r) => r.id === rowId);
+    if (currentRow && currentRow.cells[columnKey]) {
+      const currentValue = currentRow.cells[columnKey].value;
+      const finalValue = value === '' || value === null || value === undefined ? null : value;
+      
+      // 값이 변경되지 않았으면 스킵
+      if (currentValue === finalValue) {
+        return;
+      }
+    }
+    
+    // 값이 실제로 변경된 경우에만 업데이트
     dataStore.update((data) => {
       const row = data.rows.find((r) => r.id === rowId);
       if (row && row.cells[columnKey]) {
-        row.cells[columnKey].value = value;
+        // 빈 문자열은 null로 저장 (결측값 처리)
+        const finalValue = value === '' || value === null || value === undefined ? null : value;
+        row.cells[columnKey].value = finalValue;
       }
       return data;
     });
   }
 
   function formatCellValue(cell: any): string {
+    // null 값은 빈 문자열로 표시 (결측값)
     if (cell === null || cell === undefined) return '';
     if (typeof cell === 'object') return JSON.stringify(cell);
     return String(cell);
@@ -451,54 +450,100 @@
         );
 
         if (result.success && Array.isArray(result.result)) {
-          // 결과 배열을 각 행에 적용
-          result.result.forEach((item: any, index: number) => {
-            if (index < data.rows.length) {
-              const row = data.rows[index];
+          const deletedIndexes = result.deletedIndexes || [];
+          const deleteSet = new Set(deletedIndexes);
+          
+          // 삭제되지 않은 행들만 남기기
+          const remainingRows: typeof data.rows = [];
+          let resultIndex = 0;
+          
+          data.rows.forEach((row, originalIndex) => {
+            if (deleteSet.has(originalIndex)) {
+              // 이 행은 삭제됨
+              return;
+            }
+            
+            // 결과 배열에서 해당 항목 가져오기
+            if (resultIndex < result.result.length) {
+              const item = result.result[resultIndex];
+              
               if (columns.length === 1) {
                 // 단일 열: 배열의 각 요소를 해당 열에 적용
                 const cell = row.cells[columns[0]];
                 if (cell) {
-                  cell.value = item;
+                  // 빈 문자열은 null로 저장
+                  cell.value = item === '' || item === null || item === undefined ? null : item;
                 }
               } else {
                 // 여러 열: 객체의 각 속성을 해당 열에 적용
                 columns.forEach((colKey) => {
                   const cell = row.cells[colKey];
                   if (cell && item && typeof item === 'object' && colKey in item) {
-                    cell.value = item[colKey];
+                    const val = item[colKey];
+                    // 빈 문자열은 null로 저장
+                    cell.value = val === '' || val === null || val === undefined ? null : val;
                   }
                 });
               }
+              
+              resultIndex++;
             }
+            
+            remainingRows.push(row);
           });
+          
+          // 행 수 업데이트
+          data.rows = remainingRows;
+          data.metadata.rowCount = data.rows.length;
         }
       } else {
         // 단일 값 변환 모드
+        const rowsToDelete: string[] = [];
+        
         columns.forEach((columnKey) => {
           data.rows.forEach((row) => {
             const cell = row.cells[columnKey];
             if (cell) {
-              // 같은 행의 다른 열 값들을 rowData로 전달
+              // 같은 행의 다른 열 값들을 rowData로 전달 (null 처리)
               const rowData: Record<string, any> = {};
               data.columns.forEach((col) => {
-                if (col.key !== columnKey && row.cells[col.key]) {
-                  rowData[col.key] = row.cells[col.key].value;
+                if (col.key !== columnKey) {
+                  const otherCell = row.cells[col.key];
+                  // 셀이 없거나 값이 null이면 null로 저장
+                  rowData[col.key] = otherCell?.value ?? null;
                 }
               });
               
+              // null 값을 제대로 전달 (셀이 없는 경우도 null)
+              const cellValue = cell.value ?? null;
+              
               const result = executeFunctionSync(
                 code, 
-                cell.value, 
-                cell.value, 
+                cellValue, 
+                cellValue, 
                 { mode: 'single', rowData }
               );
-              if (result.success && result.result !== undefined) {
-                cell.value = result.result;
+              
+              if (result.success) {
+                // return; (undefined)로 행 삭제 표시
+                if (result.isDelete || result.result === DELETE_MARKER) {
+                  rowsToDelete.push(row.id);
+                } else if (result.result !== undefined) {
+                  // 빈 문자열은 null로 저장
+                  cell.value = result.result === '' || result.result === null ? null : result.result;
+                }
+                // result.result가 undefined이고 return이 없으면 기존값 유지 (이미 처리됨)
               }
             }
           });
         });
+        
+        // 삭제할 행 제거
+        if (rowsToDelete.length > 0) {
+          const deleteSet = new Set(rowsToDelete);
+          data.rows = data.rows.filter(row => !deleteSet.has(row.id));
+          data.metadata.rowCount = data.rows.length;
+        }
       }
       return data;
     });
@@ -563,6 +608,12 @@
     if (event.button !== 0) return; // 왼쪽 버튼만
     if (event.ctrlKey || event.metaKey || event.shiftKey) return; // Ctrl/Shift는 클릭 핸들러에서 처리
     
+    // 리사이즈 핸들 영역인지 확인
+    const target = event.target as HTMLElement;
+    if (target.classList.contains('resize-handle') || target.closest('.resize-handle')) {
+      return; // 리사이즈 핸들은 드래그에서 제외
+    }
+    
     isSelectingColumns = true;
     selectionStartColumn = columnKey;
     selectedColumns.clear();
@@ -570,41 +621,263 @@
     selectedColumns = selectedColumns; // Svelte reactivity
     lastClickedColumn = columnKey;
     
+    dragStartX = event.clientX;
+    dragCurrentX = event.clientX;
+    const columnElement = target.closest('[data-column-key]') as HTMLElement;
+    if (!columnElement) return;
+    
     event.preventDefault();
     
+    let hasMoved = false;
+    const DRAG_THRESHOLD = 5; // 픽셀 단위
+    
     const handleMouseMove = (e: MouseEvent) => {
-      if (!isSelectingColumns) return;
+      const deltaX = Math.abs(e.clientX - dragStartX);
       
-      const target = e.target as HTMLElement;
-      const columnElement = target.closest('[data-column-key]') as HTMLElement;
-      if (columnElement && selectionStartColumn) {
-        const currentColumnKey = columnElement.dataset.columnKey;
-        if (currentColumnKey) {
-          const allKeys = flatColumns.map(col => col.key);
-          const startIndex = allKeys.indexOf(selectionStartColumn);
-          const endIndex = allKeys.indexOf(currentColumnKey);
-          if (startIndex !== -1 && endIndex !== -1) {
-            selectedColumns.clear();
-            const min = Math.min(startIndex, endIndex);
-            const max = Math.max(startIndex, endIndex);
-            for (let i = min; i <= max; i++) {
-              selectedColumns.add(allKeys[i]);
+      if (!hasMoved && deltaX > DRAG_THRESHOLD) {
+        // 드래그 시작
+        hasMoved = true;
+        isSelectingColumns = false;
+        startColumnDrag(columnKey, e, columnElement);
+        return;
+      }
+      
+      if (hasMoved && draggingColumn) {
+        // 드래그 진행
+        handleColumnDrag(e);
+      } else if (isSelectingColumns && !hasMoved) {
+        // 선택 모드
+        const target = e.target as HTMLElement;
+        const columnElement = target.closest('[data-column-key]') as HTMLElement;
+        if (columnElement && selectionStartColumn) {
+          const currentColumnKey = columnElement.dataset.columnKey;
+          if (currentColumnKey) {
+            const allKeys = flatColumns.map(col => col.key);
+            const startIndex = allKeys.indexOf(selectionStartColumn);
+            const endIndex = allKeys.indexOf(currentColumnKey);
+            if (startIndex !== -1 && endIndex !== -1) {
+              selectedColumns.clear();
+              const min = Math.min(startIndex, endIndex);
+              const max = Math.max(startIndex, endIndex);
+              for (let i = min; i <= max; i++) {
+                selectedColumns.add(allKeys[i]);
+              }
+              selectedColumns = selectedColumns; // Svelte reactivity
             }
-            selectedColumns = selectedColumns; // Svelte reactivity
           }
         }
       }
     };
     
     const handleMouseUp = () => {
-      isSelectingColumns = false;
-      selectionStartColumn = null;
+      if (hasMoved && draggingColumn) {
+        endColumnDrag();
+      } else {
+        isSelectingColumns = false;
+        selectionStartColumn = null;
+      }
       document.removeEventListener('mousemove', handleMouseMove);
       document.removeEventListener('mouseup', handleMouseUp);
     };
     
     document.addEventListener('mousemove', handleMouseMove);
     document.addEventListener('mouseup', handleMouseUp);
+  }
+
+  function startColumnDrag(columnKey: string, event: MouseEvent, element: HTMLElement) {
+    draggingColumn = columnKey;
+    dragColumnElement = element;
+    dragStartX = event.clientX;
+    dragCurrentX = event.clientX;
+    
+    // 열 요소 캐시 (한 번만 쿼리)
+    dragColumnElementsCache = Array.from(
+      document.querySelectorAll('[data-column-key]')
+    ) as HTMLElement[];
+    
+    // 원본 요소의 위치 저장
+    const rect = element.getBoundingClientRect();
+    
+    // 고스트 요소 생성 (드래그 중 표시용)
+    dragGhost = element.cloneNode(true) as HTMLElement;
+    dragGhost.style.position = 'fixed';
+    dragGhost.style.left = `${rect.left}px`;
+    dragGhost.style.top = `${rect.top}px`;
+    dragGhost.style.width = `${rect.width}px`;
+    dragGhost.style.opacity = '0.8';
+    dragGhost.style.pointerEvents = 'none';
+    dragGhost.style.zIndex = '3000';
+    dragGhost.style.transform = 'scale(1.05)';
+    dragGhost.style.boxShadow = '0 4px 12px rgba(0, 0, 0, 0.3)';
+    dragGhost.classList.add('dragging-ghost');
+    document.body.appendChild(dragGhost);
+    
+    // 원본 요소 스타일 변경
+    element.style.opacity = '0.5';
+    element.style.transition = 'none';
+    
+    // 모든 헤더 셀의 transition 비활성화 (성능 향상)
+    if (header) {
+      const headerCells = header.querySelectorAll('.header-cell, .table-cell');
+      headerCells.forEach((cell: Element) => {
+        (cell as HTMLElement).style.transition = 'none';
+      });
+    }
+    
+    document.addEventListener('mousemove', handleColumnDrag);
+    document.addEventListener('mouseup', endColumnDrag);
+  }
+
+  function handleColumnDrag(event: MouseEvent) {
+    if (!draggingColumn || !dragGhost || !dragColumnElement) return;
+    
+    dragCurrentX = event.clientX;
+    
+    // requestAnimationFrame으로 업데이트 최적화
+    if (dragAnimationFrame !== null) {
+      cancelAnimationFrame(dragAnimationFrame);
+    }
+    
+    dragAnimationFrame = requestAnimationFrame(() => {
+      if (!draggingColumn || !dragGhost || !dragColumnElement) return;
+      
+      // 고스트 요소 위치 업데이트
+      const rect = dragColumnElement.getBoundingClientRect();
+      const deltaX = dragCurrentX - dragStartX;
+      dragGhost.style.left = `${rect.left + deltaX}px`;
+      
+      // 드래그 오버 중인 열 찾기 (캐시된 요소 사용)
+      if (!dragColumnElementsCache) return;
+      
+      let newDragOverColumn: string | null = null;
+      const clientX = dragCurrentX; // 클로저로 캡처
+      
+      dragColumnElementsCache.forEach((el) => {
+        const colKey = el.dataset.columnKey;
+        if (!colKey || colKey === draggingColumn) return;
+        
+        const elRect = el.getBoundingClientRect();
+        const centerX = elRect.left + elRect.width / 2;
+        
+        if (clientX >= elRect.left && clientX <= elRect.right) {
+          if (clientX < centerX) {
+            // 왼쪽에 삽입
+            newDragOverColumn = colKey;
+            el.classList.add('drag-over-left');
+            el.classList.remove('drag-over-right');
+          } else {
+            // 오른쪽에 삽입
+            newDragOverColumn = colKey;
+            el.classList.add('drag-over-right');
+            el.classList.remove('drag-over-left');
+          }
+        } else {
+          el.classList.remove('drag-over-left', 'drag-over-right');
+        }
+      });
+      
+      if (newDragOverColumn !== dragOverColumn) {
+        // 이전 드래그 오버 제거
+        if (dragOverColumn && dragColumnElementsCache) {
+          const prevEl = dragColumnElementsCache.find(
+            el => el.dataset.columnKey === dragOverColumn
+          );
+          if (prevEl) {
+            prevEl.classList.remove('drag-over-left', 'drag-over-right');
+          }
+        }
+        dragOverColumn = newDragOverColumn;
+      }
+      
+      dragAnimationFrame = null;
+    });
+  }
+
+  function endColumnDrag() {
+    if (!draggingColumn) return;
+    
+    // requestAnimationFrame 취소
+    if (dragAnimationFrame !== null) {
+      cancelAnimationFrame(dragAnimationFrame);
+      dragAnimationFrame = null;
+    }
+    
+    const sourceColumnKey = draggingColumn;
+    let targetColumnKey = dragOverColumn;
+    let insertBefore = false;
+    
+    if (targetColumnKey && dragColumnElementsCache) {
+      // 드롭 위치 결정 (캐시된 요소 사용)
+      const targetEl = dragColumnElementsCache.find(
+        el => el.dataset.columnKey === targetColumnKey
+      );
+      if (targetEl) {
+        const rect = targetEl.getBoundingClientRect();
+        const centerX = rect.left + rect.width / 2;
+        insertBefore = dragCurrentX < centerX;
+      }
+      
+      // 드래그 오버 클래스 제거 (캐시된 요소 사용)
+      dragColumnElementsCache.forEach(el => {
+        el.classList.remove('drag-over-left', 'drag-over-right');
+      });
+      
+      moveColumn(sourceColumnKey, targetColumnKey, insertBefore);
+    }
+    
+    // 모든 헤더 셀의 transition 복원
+    if (header) {
+      const headerCells = header.querySelectorAll('.header-cell, .table-cell');
+      headerCells.forEach((cell: Element) => {
+        (cell as HTMLElement).style.transition = '';
+      });
+    }
+    
+    // 정리
+    if (dragGhost) {
+      dragGhost.remove();
+      dragGhost = null;
+    }
+    
+    if (dragColumnElement) {
+      dragColumnElement.style.opacity = '';
+      dragColumnElement.style.transition = '';
+      dragColumnElement = null;
+    }
+    
+    draggingColumn = null;
+    dragOverColumn = null;
+    dragColumnElementsCache = null; // 캐시 정리
+    
+    document.removeEventListener('mousemove', handleColumnDrag);
+    document.removeEventListener('mouseup', endColumnDrag);
+  }
+
+  function moveColumn(sourceColumnKey: string, targetColumnKey: string, insertBefore: boolean) {
+    if (sourceColumnKey === targetColumnKey) return;
+    
+    dataStore.update((data) => {
+      const sourceIndex = data.columns.findIndex(c => c.key === sourceColumnKey);
+      const targetIndex = data.columns.findIndex(c => c.key === targetColumnKey);
+      
+      if (sourceIndex === -1 || targetIndex === -1) return data;
+      
+      // 열 제거
+      const [movedColumn] = data.columns.splice(sourceIndex, 1);
+      
+      // 새 위치에 삽입
+      let newIndex = targetIndex;
+      if (sourceIndex < targetIndex) {
+        // 뒤에서 앞으로 이동하는 경우
+        newIndex = insertBefore ? targetIndex - 1 : targetIndex;
+      } else {
+        // 앞에서 뒤로 이동하는 경우
+        newIndex = insertBefore ? targetIndex : targetIndex + 1;
+      }
+      
+      data.columns.splice(newIndex, 0, movedColumn);
+      return data;
+    });
   }
 
   // 열 추가/삭제 함수
@@ -1206,6 +1479,7 @@
               class="table-cell header-cell group-header {group.key ? '' : 'empty-group'}"
               style="grid-column: {item.gridColumn}; grid-row: {item.gridRow};"
               role="columnheader"
+              tabindex="-1"
               on:contextmenu={(e) => handleContextMenu(e, { type: 'group', groupKey: group.key })}
             >
               {group.label || group.key || ''}
@@ -1213,10 +1487,11 @@
           {:else if item.element === 'ungrouped-header' && item.column}
             {@const col = item.column}
             <div
-              class="table-cell header-cell merged-header {selectedColumns.has(col.key) ? 'selected' : ''}"
+              class="table-cell header-cell merged-header {selectedColumns.has(col.key) ? 'selected' : ''} {draggingColumn === col.key ? 'dragging' : ''}"
               style="grid-column: {item.gridColumn}; grid-row: {item.gridRow};"
               data-column-key={col.key}
               role="columnheader"
+              tabindex="-1"
               on:contextmenu={(e) => handleContextMenu(e, { type: 'column', key: col.key })}
               on:mousedown={(e) => handleColumnMouseDown(col.key, e)}
             >
@@ -1260,10 +1535,11 @@
           {:else if item.element === 'grouped-header' && item.column}
             {@const col = item.column}
             <div
-              class="table-cell header-cell {selectedColumns.has(col.key) ? 'selected' : ''}"
+              class="table-cell header-cell {selectedColumns.has(col.key) ? 'selected' : ''} {draggingColumn === col.key ? 'dragging' : ''}"
               style="grid-column: {item.gridColumn}; grid-row: {item.gridRow};"
               data-column-key={col.key}
               role="columnheader"
+              tabindex="-1"
               on:contextmenu={(e) => handleContextMenu(e, { type: 'column', key: col.key })}
               on:mousedown={(e) => handleColumnMouseDown(col.key, e)}
             >
@@ -1313,10 +1589,11 @@
         <div class="table-cell header-cell" style="width: {ROW_NUMBER_WIDTH}px;">#</div>
         {#each flatColumns as column}
           <div 
-            class="table-cell header-cell {selectedColumns.has(column.key) ? 'selected' : ''}" 
+            class="table-cell header-cell {selectedColumns.has(column.key) ? 'selected' : ''} {draggingColumn === column.key ? 'dragging' : ''}" 
             style="width: {getColumnWidth(column.key)}px;"
             data-column-key={column.key}
             role="columnheader"
+            tabindex="-1"
             on:contextmenu={(e) => handleContextMenu(e, { type: 'column', key: column.key })}
             on:mousedown={(e) => handleColumnMouseDown(column.key, e)}
           >
@@ -1361,21 +1638,19 @@
       </div>
     {/if}
   </div>
-  <div
-    class="table-body"
-    style="height: {tableBodyHeight > 0 ? tableBodyHeight : VISIBLE_ROWS * ROW_HEIGHT}px;"
-  >
-    <div class="table-spacer" style="height: {Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - 5) * ROW_HEIGHT}px;"></div>
-    {#each visibleRows as row (row.id)}
+  <div class="table-body">
+    {#each filteredRows as row (row.id)}
+      {@const originalIndex = originalRowIndexMap.get(row.id) ?? -1}
       <div class="table-row">
         <div 
           class="table-cell row-number" 
           style="width: {ROW_NUMBER_WIDTH}px;"
           role="rowheader"
+          tabindex="-1"
           on:contextmenu={(e) => handleContextMenu(e, { type: 'row', rowId: row.id })}
-          title={row.originalIndex >= 0 ? `원본 행 번호: ${row.originalIndex + 1}` : ''}
+          title={originalIndex >= 0 ? `원본 행 번호: ${originalIndex + 1}` : ''}
         >
-          {row.originalIndex >= 0 ? row.originalIndex + 1 : '-'}
+          {originalIndex >= 0 ? originalIndex + 1 : '-'}
         </div>
         {#each flatColumns as column}
           {@const cell = row.cells[column.key]}
@@ -1385,6 +1660,7 @@
             class="table-cell cell-wrapper" 
             style="width: {getColumnWidth(column.key)}px;"
             role="cell"
+            tabindex="-1"
             data-row-id={row.id}
             data-column-key={column.key}
             on:contextmenu={(e) => handleContextMenu(e, { type: 'cell', rowId: row.id, key: column.key })}
@@ -1445,6 +1721,9 @@
     max-height: 100%;
     overflow: auto;
     position: relative;
+    /* 성능 최적화 */
+    will-change: scroll-position;
+    contain: layout style paint;
   }
 
   .table-header {
@@ -1460,6 +1739,7 @@
   .table-body {
     position: relative;
     width: fit-content;
+    min-width: 100%;
   }
 
   .table-row {
@@ -1509,6 +1789,15 @@
     background: var(--bg-secondary);
     overflow: visible;
     user-select: none;
+    cursor: grab;
+  }
+
+  .header-cell:active {
+    cursor: grabbing;
+  }
+
+  .header-cell.dragging {
+    cursor: grabbing;
   }
 
   .header-cell.selected {
@@ -1518,6 +1807,61 @@
   .header-cell.selected .header-label {
     color: var(--accent);
     font-weight: 700;
+  }
+
+  /* 동적으로 추가되는 클래스 - 드래그 중 표시용 */
+  :global(.header-cell.drag-over-left::before) {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    width: 3px;
+    background: var(--accent);
+    z-index: 10;
+    animation: drag-indicator-pulse 0.6s ease-in-out infinite;
+  }
+
+  /* 동적으로 추가되는 클래스 - 드래그 중 표시용 */
+  :global(.header-cell.drag-over-right::after) {
+    content: '';
+    position: absolute;
+    right: 0;
+    top: 0;
+    bottom: 0;
+    width: 3px;
+    background: var(--accent);
+    z-index: 10;
+    animation: drag-indicator-pulse 0.6s ease-in-out infinite;
+  }
+
+  @keyframes drag-indicator-pulse {
+    0%, 100% {
+      opacity: 0.6;
+      transform: scaleY(1);
+    }
+    50% {
+      opacity: 1;
+      transform: scaleY(1.1);
+    }
+  }
+
+  /* 동적으로 생성되는 고스트 요소용 스타일 */
+  :global(.dragging-ghost) {
+    transition: transform 0.1s ease-out;
+  }
+
+  .header-cell {
+    transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1), background 0.2s ease;
+  }
+  
+  /* 드래그 중에는 transition 비활성화 */
+  .header-cell.dragging {
+    transition: none !important;
+  }
+
+  .table-cell {
+    transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
   }
 
   .group-header {
@@ -1539,7 +1883,7 @@
 
   .header-label {
     flex: 1;
-    cursor: pointer;
+    cursor: inherit;
     user-select: none;
   }
 
@@ -1658,7 +2002,4 @@
     color: var(--text-primary);
   } */
 
-  .table-spacer {
-    width: 100%;
-  }
 </style>
