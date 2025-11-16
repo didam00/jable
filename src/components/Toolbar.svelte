@@ -7,6 +7,7 @@
 
   const dispatch = createEventDispatcher<{
     newTab: File | { path: string; name: string };
+    createEmpty: void;
     save: void;
     saveAs: void;
     searchChange: { matchedRowIds: Set<string>; filteredColumnKeys: string[] | null };
@@ -16,6 +17,7 @@
   let fileInput: HTMLInputElement;
   let canUndo = false;
   let canRedo = false;
+  let isMenuOpen = false;
 
   dataStore.subscribe(() => {
     canUndo = dataStore.canUndo();
@@ -23,6 +25,7 @@
   });
 
   async function handleFileOpen() {
+    isMenuOpen = false;
     if (isTauri()) {
       try {
         const dialogModule = await import('@tauri-apps/plugin-dialog');
@@ -84,6 +87,7 @@
   }
 
   async function handlePaste() {
+    isMenuOpen = false;
     try {
       const data = await importFromClipboard();
       // 붙여넣기는 현재 활성 탭에 추가하거나 새 탭 생성하지 않음 (기존 동작 유지)
@@ -94,6 +98,7 @@
   }
 
   async function handleExport(format: 'json' | 'csv' | 'xml' | 'toon') {
+    isMenuOpen = false;
     dataStore.subscribe(async (data) => {
       try {
         await exportFile(data, format);
@@ -110,10 +115,26 @@
   function handleRedo() {
     dataStore.redo();
   }
+
+  function handleCreateEmpty() {
+    dispatch('createEmpty');
+  }
+
+  function toggleMenu() {
+    isMenuOpen = !isMenuOpen;
+  }
+
+  function openSettings() {
+    isMenuOpen = false;
+    dispatch('openSettings');
+  }
 </script>
 
 <header class="toolbar">
   <div class="toolbar-left">
+    <button class="btn-icon mobile-toggle" on:click={toggleMenu} title="메뉴 열기/닫기">
+      <span class="material-icons">menu</span>
+    </button>
     <button class="btn-icon" on:click={handleFileOpen} title="파일 열기">
       <span class="material-icons">folder_open</span>
     </button>
@@ -128,6 +149,9 @@
     {/if}
     <button class="btn-icon" on:click={handlePaste} title="붙여넣기">
       <span class="material-icons">content_paste</span>
+    </button>
+    <button class="btn-icon" on:click={handleCreateEmpty} title="빈 JSON 탭 만들기">
+      <span class="material-icons">note_add</span>
     </button>
     <div class="divider"></div>
     <button class="btn-icon" on:click={() => dispatch('save')} title="저장 (Ctrl+S)">
@@ -145,21 +169,21 @@
     </button>
   </div>
   <SearchBar on:searchChange={(e) => dispatch('searchChange', e.detail)} />
-  <div class="toolbar-right">
+  <div class="toolbar-right" class:open={isMenuOpen}>
     export as
     <button class="btn" on:click={() => handleExport('toon')}>TOON</button><span class="split">|</span>
     <button class="btn" on:click={() => handleExport('json')}>JSON</button><span class="split">|</span>
     <button class="btn" on:click={() => handleExport('csv')}>CSV</button><span class="split">|</span>
     <button class="btn" on:click={() => handleExport('xml')}>XML</button>
-    <button class="btn-icon" on:click={() => dispatch('openSettings')} title="설정">
+    <button class="btn-icon" on:click={openSettings} title="설정">
       <span class="material-icons">settings</span>
     </button>
   </div>
 </header>
 
-<style>
-  .toolbar {
-    display: flex;
+  <style>
+    .toolbar {
+      display: flex;
     align-items: center;
     /* justify-content: space-between; */
     padding: 0.75rem 1rem;
@@ -228,6 +252,48 @@
 
   .btn {
     font-weight: 500;
-    color: var(--accent);
-  }
-</style>
+      color: var(--accent);
+    }
+
+    .mobile-toggle {
+      display: none;
+    }
+
+    @media (max-width: 768px) {
+      .toolbar {
+        flex-wrap: wrap;
+        align-items: flex-start;
+      }
+
+      .toolbar-left {
+        width: 100%;
+        flex-wrap: wrap;
+        gap: 0.35rem;
+      }
+
+      .toolbar-right {
+        width: 100%;
+        justify-content: flex-start;
+        display: none;
+        flex-wrap: wrap;
+        padding-top: 0.25rem;
+      }
+
+      .toolbar-right.open {
+        display: flex;
+      }
+
+      .mobile-toggle {
+        display: inline-flex;
+      }
+
+      .toolbar-right .btn,
+      .toolbar-right .btn-icon {
+        margin-top: 0.25rem;
+      }
+
+      .divider {
+        display: none;
+      }
+    }
+  </style>

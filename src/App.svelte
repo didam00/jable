@@ -157,6 +157,19 @@
     return tabId;
   }
 
+  function createEmptyTab() {
+    const emptyData: TableData = {
+      columns: [],
+      rows: [],
+      metadata: { rowCount: 0, columnCount: 0, isFlat: true },
+    };
+
+    const tabId = createNewTab({ path: 'untitled.json', name: 'untitled.json' }, emptyData, 'json');
+    dataStore.setCurrentTab(tabId);
+    dataStore.set(emptyData, true);
+    viewMode = 'table';
+  }
+
   function switchToTab(tabId: string) {
     const tab = tabs.find(t => t.id === tabId);
     if (!tab) return;
@@ -548,6 +561,7 @@
     on:newTab={(e) => {
       handleFileDrop(e.detail);
     }}
+    on:createEmpty={createEmptyTab}
     on:save={handleSave}
     on:saveAs={handleSaveAs}
     on:searchChange={(e) => {
