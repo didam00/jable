@@ -6,14 +6,9 @@
     show = false;
   }
 
-  function handleOverlayClick(event: MouseEvent) {
-    if (event.target === event.currentTarget) {
-      handleClose();
-    }
-  }
-
-  function handleKeydown(event: KeyboardEvent) {
-    if (event.key === 'Escape') {
+  function handleOverlayKeydown(event: KeyboardEvent) {
+    if (event.key === 'Escape' || event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
       handleClose();
     }
   }
@@ -29,14 +24,32 @@
   }
 </script>
 
-<svelte:window on:keydown={handleKeydown} />
+<svelte:window on:keydown={(event) => event.key === 'Escape' && handleOverlayKeydown(event)} />
 
 {#if show && imageUrl}
-  <div class="overlay" on:click={handleOverlayClick} role="dialog" aria-modal="true" aria-label="이미지 뷰어">
+  <div
+    class="overlay"
+    role="dialog"
+    aria-modal="true"
+    aria-label="이미지 뷰어"
+    tabindex="-1"
+  >
     <button class="close-btn" on:click={handleClose} title="닫기 (ESC)">
       <span class="material-icons">close</span>
     </button>
-    <div class="image-container" on:click|stopPropagation role="button" tabindex="0" on:keydown={(e) => e.key === 'Enter' && handleOverlayClick}>
+    <div
+      class="image-container"
+      on:click|stopPropagation
+      role="button"
+      tabindex="0"
+      aria-label="이미지 확대 보기"
+      on:keydown={(event) => {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          handleClose();
+        }
+      }}
+    >
       <img src={imageUrl} alt="이미지 미리보기" on:error={handleImageError} />
       <div class="error-message" style="display: none;">
         <span class="material-icons">error</span>

@@ -3,7 +3,7 @@
  */
 import type { TableData } from '../store/types';
 import type { SearchResult } from './types';
-import { parseQuery, type ParsedQuery } from './queryParser';
+import { parseQuery } from './queryParser';
 
 export function searchData(data: TableData, query: string, useRegex: boolean = false): SearchResult[] {
   if (!query.trim()) return [];

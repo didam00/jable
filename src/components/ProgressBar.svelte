@@ -20,6 +20,10 @@
           <div class="spinner-circle"></div>
           <div class="spinner-circle"></div>
         </div>
+        <div class="progress-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow={progress}>
+          <div class="progress-bar-fill" style={`width: ${Math.min(100, Math.max(0, progress))}%`}></div>
+        </div>
+        <span class="progress-percent">{Math.min(100, Math.max(0, progress)).toFixed(0)}%</span>
       </div>
     </div>
   </div>
@@ -72,6 +76,30 @@
     align-items: center;
     justify-content: center;
     gap: 1rem;
+  }
+
+  .progress-bar {
+    position: relative;
+    flex: 1;
+    height: 10px;
+    background: var(--bg-secondary);
+    border-radius: 999px;
+    overflow: hidden;
+    min-width: 200px;
+    border: 1px solid var(--border);
+  }
+
+  .progress-bar-fill {
+    height: 100%;
+    background: linear-gradient(90deg, var(--accent), var(--accent-hover));
+    transition: width 0.2s ease;
+  }
+
+  .progress-percent {
+    font-size: 0.875rem;
+    color: var(--text-secondary);
+    min-width: 48px;
+    text-align: right;
   }
 
   .loading-spinner {

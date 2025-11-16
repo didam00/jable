@@ -157,6 +157,19 @@
     return tabId;
   }
 
+  function createEmptyTab() {
+    const emptyData: TableData = {
+      columns: [],
+      rows: [],
+      metadata: { rowCount: 0, columnCount: 0, isFlat: true },
+    };
+
+    const tabId = createNewTab({ path: 'untitled.json', name: 'untitled.json' }, emptyData, 'json');
+    dataStore.setCurrentTab(tabId);
+    dataStore.set(emptyData, true);
+    viewMode = 'table';
+  }
+
   function switchToTab(tabId: string) {
     const tab = tabs.find(t => t.id === tabId);
     if (!tab) return;
@@ -548,6 +561,7 @@
     on:newTab={(e) => {
       handleFileDrop(e.detail);
     }}
+    on:createEmpty={createEmptyTab}
     on:save={handleSave}
     on:saveAs={handleSaveAs}
     on:searchChange={(e) => {
@@ -690,33 +704,9 @@
     margin-top: -64px;
   }
 
-  .empty-state h2 {
-    font-size: 2rem;
-    font-weight: 600;
-    margin-bottom: 0.5rem;
-    color: var(--text-primary);
-  }
-
   .empty-state p {
     font-size: 0.875rem;
     margin-top: -0.25rem;
-  }
-
-  .shortcuts {
-    margin-top: 2rem;
-    text-align: left;
-  }
-
-  .shortcuts ul {
-    list-style: none;
-    padding: 0;
-    margin-top: 0.5rem;
-  }
-
-  .shortcuts li {
-    padding: 0.25rem 0;
-    font-size: 0.875rem;
-    color: var(--text-secondary);
   }
 
   .stats-controls-container {

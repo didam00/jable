@@ -6,11 +6,29 @@
     onConfirm(merge);
     show = false;
   }
+
+  function handleOverlayClick(event: MouseEvent) {
+    if (event.target === event.currentTarget) {
+      handleConfirm(false);
+    }
+  }
 </script>
 
 {#if show}
-  <div class="overlay" on:click={() => handleConfirm(false)}>
-    <div class="dialog" on:click|stopPropagation>
+  <div
+    class="overlay"
+    role="button"
+    tabindex="0"
+    aria-label="병합 선택 창 닫기"
+    on:click={handleOverlayClick}
+    on:keydown={(event) => {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        handleConfirm(false);
+      }
+    }}
+  >
+    <div class="dialog" role="dialog" aria-modal="true" aria-label="파일 병합 선택">
       <h3>파일 병합</h3>
       <p>이미 데이터가 열려있습니다. 어떻게 하시겠습니까?</p>
       <div class="buttons">
