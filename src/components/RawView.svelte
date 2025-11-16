@@ -2,6 +2,7 @@
   import { dataStore } from '../agents/store';
   import { exportToJSON, parseJSON } from '../agents/parser';
   import { compressToToon, decompressFromToon } from '../agents/compression/toon';
+  import { compressToEncodedURIComponent, decompressFromEncodedURIComponent } from '../agents/compression/lzString';
   import type { TableData } from '../agents/store';
   import { onMount, createEventDispatcher } from 'svelte';
 
@@ -17,20 +18,21 @@
     metadata: { rowCount: 0, columnCount: 0, isFlat: true },
   };
 
-  let displayFormat: 'toon' | 'json' = 'toon'; // 기본값을 toon으로 설정
+  let displayFormat: 'toon' | 'json' | 'compressed' = 'toon';
   let jsonString = '';
-  let toonString = '';
-  let jsonLines: string[] = [];
+  let compressedString = '';
+  let editorContent = '';
   let error: string | null = null;
-  let container: HTMLDivElement;
   let textarea: HTMLTextAreaElement;
-  let highlightDiv: HTMLPreElement;
   let updateTimeout: ReturnType<typeof setTimeout> | null = null;
   let isUpdatingFromStore = false;
   let isLoading = false;
   let isRendering = false;
   let lastDataHash = '';
   let isInitialized = false;
+  let compressedLength = 0;
+  let exceedsUrlLimit = false;
+  const URL_CHAR_LIMIT = 2000;
 
   // 데이터 해시 계산 (간단한 버전)
   function calculateDataHash(data: TableData): string {
@@ -56,42 +58,39 @@
 
   async function updateJSON() {
     if (isLoading || isRendering) return;
-    
+
     try {
       isLoading = true;
       error = null;
-      
+
       let content = '';
-      
-      if (displayFormat === 'toon') {
-        // TOON 형식으로 압축 (더 빠름)
+
+      const toonContent = await new Promise<string>((resolve) => {
+        requestIdleCallback(() => {
+          const result = compressToToon(data);
+          resolve(result);
+        }, { timeout: 100 });
+      });
+
+      if (displayFormat === 'json') {
         content = await new Promise<string>((resolve) => {
           requestIdleCallback(() => {
-            const result = compressToToon(data);
-            resolve(result);
+            resolve(exportToJSON(data));
           }, { timeout: 100 });
         });
-        
-        if (content !== toonString) {
-          toonString = content;
-          jsonString = ''; // JSON은 초기화
-        }
+        jsonString = content;
+      } else if (displayFormat === 'compressed') {
+        const compressed = compressToEncodedURIComponent(toonContent);
+        compressedLength = compressed.length;
+        exceedsUrlLimit = compressedLength > URL_CHAR_LIMIT;
+        compressedString = formatCompressedForDisplay(compressed);
+        content = compressedString;
       } else {
-        // JSON 형식
-        content = await new Promise<string>((resolve) => {
-          requestIdleCallback(() => {
-            const result = exportToJSON(data);
-            resolve(result);
-          }, { timeout: 100 });
-        });
-        
-        if (content !== jsonString) {
-          jsonString = content;
-          toonString = ''; // TOON은 초기화
-          jsonLines = content.split('\n');
-        }
+        content = toonContent;
       }
-      
+
+      editorContent = content;
+
       // 텍스트 렌더링도 청크 단위로 처리
       if (textarea && content) {
         isUpdatingFromStore = true;
@@ -160,17 +159,20 @@
 
   function handleInput() {
     if (isUpdatingFromStore) return;
-    
-    const inputValue = textarea.value;
-    
+
+    const inputValue = editorContent;
+
     try {
       if (displayFormat === 'toon') {
         // TOON 형식 파싱
         try {
           const tableData = decompressFromToon(inputValue);
           error = null;
-          toonString = inputValue;
-          
+          const compressed = compressToEncodedURIComponent(inputValue);
+          compressedString = formatCompressedForDisplay(compressed);
+          compressedLength = compressed.length;
+          exceedsUrlLimit = compressedLength > URL_CHAR_LIMIT;
+
           // 테이블 데이터로 업데이트
           if (updateTimeout) {
             clearTimeout(updateTimeout);
@@ -189,13 +191,36 @@
         } catch (e) {
           error = e instanceof Error ? e.message : 'Invalid TOON format';
         }
+      } else if (displayFormat === 'compressed') {
+        const normalized = inputValue.replace(/\s+/g, '');
+        const toonPayload = decompressFromEncodedURIComponent(normalized);
+        const tableData = decompressFromToon(toonPayload);
+        error = null;
+        compressedLength = normalized.length;
+        exceedsUrlLimit = compressedLength > URL_CHAR_LIMIT;
+        compressedString = formatCompressedForDisplay(normalized);
+
+        if (updateTimeout) {
+          clearTimeout(updateTimeout);
+        }
+
+        updateTimeout = setTimeout(() => {
+          try {
+            isUpdatingFromStore = true;
+            dataStore.set(tableData);
+            setTimeout(() => {
+              isUpdatingFromStore = false;
+            }, 0);
+          } catch (e) {
+            console.warn('Failed to update table data:', e);
+          }
+        }, 500);
       } else {
         // JSON 형식 파싱
         JSON.parse(inputValue); // 유효성 검사만
         error = null;
         jsonString = inputValue;
-        jsonLines = jsonString.split('\n');
-        
+
         // JSON이 유효하면 테이블 데이터로 파싱 및 업데이트
         if (updateTimeout) {
           clearTimeout(updateTimeout);
@@ -221,6 +246,11 @@
 
   function handleScroll() {
     // 하이라이트 비활성화로 스크롤 처리 불필요
+  }
+
+
+  function formatCompressedForDisplay(compressed: string): string {
+    return compressed.match(/.{1,80}/g)?.join('\n') ?? compressed;
   }
 
 
@@ -480,7 +510,7 @@
 </script>
 
 
-<div class="raw-view" bind:this={container}>
+<div class="raw-view">
   <div class="raw-toolbar">
     <div class="format-selector">
       <button
@@ -499,17 +529,35 @@
       >
         JSON
       </button>
+      <button
+        class="format-btn"
+        class:active={displayFormat === 'compressed'}
+        on:click={() => { displayFormat = 'compressed'; }}
+        title="압축 문자열 (URL 공유)"
+      >
+        Compressed
+      </button>
     </div>
+    {#if displayFormat === 'compressed'}
+      <span class="hint">
+        {compressedLength.toLocaleString()} chars
+        {#if exceedsUrlLimit}
+          · {URL_CHAR_LIMIT}자 초과 (쿼리 공유 시 잘릴 수 있음)
+        {:else}
+          · URL 공유 가능
+        {/if}
+      </span>
+    {/if}
     {#if error}
       <span class="error">{error}</span>
     {/if}
   </div>
   <div class="json-editor-wrapper">
-    <pre class="json-highlight" bind:this={highlightDiv} aria-hidden="true"></pre>
+    <pre class="json-highlight" aria-hidden="true"></pre>
     <textarea
       class="json-editor"
       bind:this={textarea}
-      bind:value={jsonString}
+      bind:value={editorContent}
       on:input={handleInput}
       on:scroll={handleScroll}
       on:contextmenu={handleContextMenu}
@@ -569,6 +617,11 @@
 
   .error {
     color: var(--error);
+    font-size: 0.875rem;
+  }
+
+  .hint {
+    color: var(--text-secondary);
     font-size: 0.875rem;
   }
 
