@@ -215,16 +215,6 @@
     validateAndPreview();
   }
 
-  // 다이얼로그 클릭 전파 방지
-  function handleDialogClick(event: MouseEvent) {
-    event.stopPropagation();
-  }
-
-  // 다이얼로그 키보드 이벤트 전파 방지
-  function handleDialogKeydown(event: KeyboardEvent) {
-    event.stopPropagation();
-  }
-
   // Tab 키 처리 함수
   function handleTabKey(e: KeyboardEvent) {
     if (e.key === 'Tab') {
@@ -268,14 +258,12 @@
     role="presentation"
     on:keydown={(e) => e.key === 'Escape' && handleClose()}
   >
-    <div 
-      class="dialog" 
+    <div
+      class="dialog"
       role="dialog"
       aria-modal="true"
       aria-labelledby="dialog-title"
       tabindex="-1"
-      on:click|stopPropagation={handleDialogClick}
-      on:keydown|stopPropagation={handleDialogKeydown}
     >
       <div class="dialog-header">
         <h3 id="dialog-title">열 변환 함수 적용</h3>
@@ -283,6 +271,10 @@
           <span class="material-icons">close</span>
         </button>
       </div>
+
+      {#if errorMessage}
+        <div class="error-banner" role="alert">{errorMessage}</div>
+      {/if}
 
       <div class="dialog-content">
         <div class="section">
@@ -488,6 +480,16 @@
     justify-content: space-between;
     padding: 1rem 1.5rem;
     border-bottom: 1px solid var(--border);
+  }
+
+  .error-banner {
+    margin: 1rem 1.5rem 0;
+    padding: 0.75rem 1rem;
+    border-radius: 8px;
+    background: rgba(255, 99, 132, 0.1);
+    color: var(--error);
+    font-size: 0.9rem;
+    border: 1px solid rgba(255, 99, 132, 0.3);
   }
 
   .dialog-header h3 {

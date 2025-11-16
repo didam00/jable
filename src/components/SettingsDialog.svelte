@@ -32,11 +32,29 @@
     })();
     onClose();
   }
+
+  function handleOverlayClick(event: MouseEvent) {
+    if (event.target === event.currentTarget) {
+      handleCancel();
+    }
+  }
 </script>
 
 {#if isOpen}
-  <div class="settings-overlay" on:click={handleCancel} on:keydown={(e) => e.key === 'Escape' && handleCancel()}>
-    <div class="settings-dialog" on:click|stopPropagation>
+  <div
+    class="settings-overlay"
+    role="presentation"
+    tabindex="-1"
+    on:click={handleOverlayClick}
+    on:keydown={(e) => e.key === 'Escape' && handleCancel()}
+  >
+    <div
+      class="settings-dialog"
+      role="dialog"
+      aria-modal="true"
+      aria-label="설정"
+      tabindex="-1"
+    >
       <div class="settings-header">
         <h2>설정</h2>
         <button class="close-btn" on:click={handleCancel} title="닫기">

@@ -113,7 +113,7 @@ export function parseCSV(csvString: string, onProgress?: ProgressCallback): Tabl
     let headers: string[] = [];
     let columns: Column[] = [];
     
-    const result = Papa.parse(csvString, {
+    Papa.parse(csvString, {
       header: true,
       skipEmptyLines: true,
       transformHeader: (header: string) => header.trim(),

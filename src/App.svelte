@@ -704,33 +704,9 @@
     margin-top: -64px;
   }
 
-  .empty-state h2 {
-    font-size: 2rem;
-    font-weight: 600;
-    margin-bottom: 0.5rem;
-    color: var(--text-primary);
-  }
-
   .empty-state p {
     font-size: 0.875rem;
     margin-top: -0.25rem;
-  }
-
-  .shortcuts {
-    margin-top: 2rem;
-    text-align: left;
-  }
-
-  .shortcuts ul {
-    list-style: none;
-    padding: 0;
-    margin-top: 0.5rem;
-  }
-
-  .shortcuts li {
-    padding: 0.25rem 0;
-    font-size: 0.875rem;
-    color: var(--text-secondary);
   }
 
   .stats-controls-container {

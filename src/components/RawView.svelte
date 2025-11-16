@@ -625,21 +625,6 @@
     font-size: 0.875rem;
   }
 
-  .json-placeholder {
-    flex: 1;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    color: var(--text-secondary);
-    font-size: 0.875rem;
-    cursor: pointer;
-    user-select: none;
-  }
-
-  .json-placeholder:hover {
-    color: var(--text-primary);
-  }
-
   .json-editor-wrapper {
     position: relative;
     flex: 1;

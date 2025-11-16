@@ -55,6 +55,7 @@
   // 셀 편집 상태
   let editingCell: { rowId: string; columnKey: string } | null = null;
   let editingValue: string = '';
+  let editingInput: HTMLInputElement | null = null;
 
   const ROW_HEIGHT = 32;
   const DEFAULT_COLUMN_WIDTH = 200;
@@ -758,7 +759,7 @@
     editingValue = '';
   }
   
-  function handleCellClick(rowId: string, columnKey: string, event: MouseEvent) {
+  function handleCellClick(rowId: string, columnKey: string, event: MouseEvent | KeyboardEvent) {
     // 이미 편집 중인 셀이 있으면 커밋
     if (editingCell) {
       if (editingCell.rowId !== rowId || editingCell.columnKey !== columnKey) {
@@ -772,6 +773,11 @@
     // 새 셀 편집 시작
     startCellEdit(rowId, columnKey);
     event.stopPropagation();
+  }
+
+  $: if (editingInput) {
+    editingInput.focus();
+    editingInput.select();
   }
   
   function handleCellKeydown(event: KeyboardEvent, rowId: string, columnKey: string) {
@@ -2125,14 +2131,20 @@
           {@const cellValue = cell?.value}
           {@const isImage = isImageUrl(cellValue)}
           {@const isEditing = editingCell?.rowId === row.id && editingCell?.columnKey === column.key}
-          <div 
-            class="table-cell cell-wrapper" 
+          <div
+            class="table-cell cell-wrapper"
             style="width: {getColumnWidth(column.key)}px;"
             role="cell"
-            tabindex="-1"
+            tabindex="0"
             data-row-id={row.id}
             data-column-key={column.key}
             on:click={(e) => handleCellClick(row.id, column.key, e)}
+            on:keydown={(event) => {
+              if (event.key === 'Enter' || event.key === ' ') {
+                event.preventDefault();
+                handleCellClick(row.id, column.key, event);
+              }
+            }}
             on:contextmenu={(e) => handleContextMenu(e, { type: 'cell', rowId: row.id, key: column.key })}
           >
             {#if isEditing}
@@ -2141,9 +2153,9 @@
                 class="cell-input editing"
                 class:has-image={isImage}
                 bind:value={editingValue}
+                bind:this={editingInput}
                 on:keydown={(e) => handleCellKeydown(e, row.id, column.key)}
                 on:blur={commitCellEdit}
-                autofocus
               />
             {:else}
               <div class="cell-display" class:has-image={isImage}>
