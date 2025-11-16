@@ -25,7 +25,6 @@
   async function handleFileOpen() {
     if (isTauri()) {
       try {
-        // @ts-expect-error - Tauri plugin types may not be available at compile time
         const dialogModule = await import('@tauri-apps/plugin-dialog');
         const { open } = dialogModule as any;
         const selected = await open({
@@ -152,7 +151,6 @@
     <button class="btn" on:click={() => handleExport('json')}>JSON</button><span class="split">|</span>
     <button class="btn" on:click={() => handleExport('csv')}>CSV</button><span class="split">|</span>
     <button class="btn" on:click={() => handleExport('xml')}>XML</button>
-    <div class="divider"></div>
     <button class="btn-icon" on:click={() => dispatch('openSettings')} title="설정">
       <span class="material-icons">settings</span>
     </button>
