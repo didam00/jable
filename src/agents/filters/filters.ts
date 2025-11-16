@@ -61,12 +61,46 @@ export function sortRows(rows: Row[], columnKey: string, direction: 'asc' | 'des
 
 export function getColumnValues(data: TableData, columnKey: string): any[] {
   const values = new Set<any>();
+  const specialValues: any[] = []; // null, undefined, 빈 문자열 등 특이값
+  const normalValues: any[] = []; // 일반 값들
+  
   data.rows.forEach((row) => {
     const cell = row.cells[columnKey];
     if (cell) {
-      values.add(cell.value);
+      const value = cell.value;
+      // 특이값 체크 (null, undefined, 빈 문자열)
+      if (value === null || value === undefined || value === '') {
+        if (!specialValues.includes(value)) {
+          specialValues.push(value);
+        }
+      } else {
+        if (!normalValues.includes(value)) {
+          normalValues.push(value);
+        }
+      }
+    } else {
+      // 셀이 없는 경우도 undefined로 처리
+      if (!specialValues.includes(undefined)) {
+        specialValues.push(undefined);
+      }
     }
   });
-  return Array.from(values);
+  
+  // 특이값을 먼저, 그 다음 일반 값들을 정렬해서 반환
+  // 특이값 순서: undefined -> null -> ''
+  const sortedSpecialValues = [
+    ...specialValues.filter(v => v === undefined),
+    ...specialValues.filter(v => v === null),
+    ...specialValues.filter(v => v === '')
+  ];
+  
+  // 일반 값들을 문자열로 변환해서 정렬
+  const sortedNormalValues = normalValues.sort((a, b) => {
+    const aStr = String(a);
+    const bStr = String(b);
+    return aStr.localeCompare(bStr);
+  });
+  
+  return [...sortedSpecialValues, ...sortedNormalValues];
 }
 

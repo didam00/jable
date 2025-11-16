@@ -1,6 +1,7 @@
 <script lang="ts">
   import { dataStore } from '../agents/store';
   import { exportToJSON, parseJSON } from '../agents/parser';
+  import { compressToToon, decompressFromToon } from '../agents/compression/toon';
   import type { TableData } from '../agents/store';
   import { onMount, createEventDispatcher } from 'svelte';
 
@@ -16,7 +17,9 @@
     metadata: { rowCount: 0, columnCount: 0, isFlat: true },
   };
 
+  let displayFormat: 'toon' | 'json' = 'toon'; // 기본값을 toon으로 설정
   let jsonString = '';
+  let toonString = '';
   let jsonLines: string[] = [];
   let error: string | null = null;
   let container: HTMLDivElement;
@@ -58,25 +61,42 @@
       isLoading = true;
       error = null;
       
-      // JSON 생성을 비동기로 처리 (큰 데이터의 경우 블로킹 방지)
-      const json = await new Promise<string>((resolve) => {
-        requestIdleCallback(() => {
-          const result = exportToJSON(data);
-          resolve(result);
-        }, { timeout: 100 });
-      });
+      let content = '';
       
-      // JSON이 실제로 변경되었을 때만 업데이트
-      if (json !== jsonString) {
-        jsonString = json;
-        jsonLines = json.split('\n');
+      if (displayFormat === 'toon') {
+        // TOON 형식으로 압축 (더 빠름)
+        content = await new Promise<string>((resolve) => {
+          requestIdleCallback(() => {
+            const result = compressToToon(data);
+            resolve(result);
+          }, { timeout: 100 });
+        });
         
-        // 텍스트 렌더링도 청크 단위로 처리
-        if (textarea) {
-          isUpdatingFromStore = true;
-          await renderTextChunked(json);
-          isUpdatingFromStore = false;
+        if (content !== toonString) {
+          toonString = content;
+          jsonString = ''; // JSON은 초기화
         }
+      } else {
+        // JSON 형식
+        content = await new Promise<string>((resolve) => {
+          requestIdleCallback(() => {
+            const result = exportToJSON(data);
+            resolve(result);
+          }, { timeout: 100 });
+        });
+        
+        if (content !== jsonString) {
+          jsonString = content;
+          toonString = ''; // TOON은 초기화
+          jsonLines = content.split('\n');
+        }
+      }
+      
+      // 텍스트 렌더링도 청크 단위로 처리
+      if (textarea && content) {
+        isUpdatingFromStore = true;
+        await renderTextChunked(content);
+        isUpdatingFromStore = false;
       }
       
       isLoading = false;
@@ -84,6 +104,11 @@
       error = e instanceof Error ? e.message : 'Unknown error';
       isLoading = false;
     }
+  }
+  
+  // displayFormat 변경 시 업데이트
+  $: if (displayFormat !== undefined) {
+    updateJSON();
   }
 
   async function renderTextChunked(text: string) {
@@ -136,34 +161,61 @@
   function handleInput() {
     if (isUpdatingFromStore) return;
     
-    jsonString = textarea.value;
-    jsonLines = jsonString.split('\n');
+    const inputValue = textarea.value;
     
     try {
-      JSON.parse(jsonString); // 유효성 검사만
-      error = null;
-      
-      // JSON이 유효하면 테이블 데이터로 파싱 및 업데이트
-      if (updateTimeout) {
-        clearTimeout(updateTimeout);
-      }
-      updateTimeout = setTimeout(() => {
+      if (displayFormat === 'toon') {
+        // TOON 형식 파싱
         try {
-          const tableData = parseJSON(jsonString);
-          isUpdatingFromStore = true;
-          dataStore.set(tableData);
-          setTimeout(() => {
-            isUpdatingFromStore = false;
-          }, 0);
+          const tableData = decompressFromToon(inputValue);
+          error = null;
+          toonString = inputValue;
+          
+          // 테이블 데이터로 업데이트
+          if (updateTimeout) {
+            clearTimeout(updateTimeout);
+          }
+          updateTimeout = setTimeout(() => {
+            try {
+              isUpdatingFromStore = true;
+              dataStore.set(tableData);
+              setTimeout(() => {
+                isUpdatingFromStore = false;
+              }, 0);
+            } catch (e) {
+              console.warn('Failed to update table data:', e);
+            }
+          }, 500); // 500ms 디바운스
         } catch (e) {
-          // 파싱 실패는 이미 error로 표시됨
-          console.warn('Failed to update table data:', e);
+          error = e instanceof Error ? e.message : 'Invalid TOON format';
         }
-      }, 500); // 500ms 디바운스
-      
-      // 하이라이트 비활성화 - 성능 최적화
+      } else {
+        // JSON 형식 파싱
+        JSON.parse(inputValue); // 유효성 검사만
+        error = null;
+        jsonString = inputValue;
+        jsonLines = jsonString.split('\n');
+        
+        // JSON이 유효하면 테이블 데이터로 파싱 및 업데이트
+        if (updateTimeout) {
+          clearTimeout(updateTimeout);
+        }
+        updateTimeout = setTimeout(() => {
+          try {
+            const tableData = parseJSON(jsonString);
+            isUpdatingFromStore = true;
+            dataStore.set(tableData);
+            setTimeout(() => {
+              isUpdatingFromStore = false;
+            }, 0);
+          } catch (e) {
+            // 파싱 실패는 이미 error로 표시됨
+            console.warn('Failed to update table data:', e);
+          }
+        }, 500); // 500ms 디바운스
+      }
     } catch (e) {
-      error = e instanceof Error ? e.message : 'Invalid JSON';
+      error = e instanceof Error ? e.message : `Invalid ${displayFormat.toUpperCase()}`;
     }
   }
 
@@ -430,6 +482,24 @@
 
 <div class="raw-view" bind:this={container}>
   <div class="raw-toolbar">
+    <div class="format-selector">
+      <button
+        class="format-btn"
+        class:active={displayFormat === 'toon'}
+        on:click={() => { displayFormat = 'toon'; }}
+        title="TOON 형식 (압축, 빠름)"
+      >
+        TOON
+      </button>
+      <button
+        class="format-btn"
+        class:active={displayFormat === 'json'}
+        on:click={() => { displayFormat = 'json'; }}
+        title="JSON 형식 (읽기 쉬움)"
+      >
+        JSON
+      </button>
+    </div>
     {#if error}
       <span class="error">{error}</span>
     {/if}
@@ -459,10 +529,41 @@
   .raw-toolbar {
     display: flex;
     align-items: center;
+    justify-content: space-between;
     gap: 1rem;
     padding: 0.75rem 1rem;
     border-bottom: 1px solid var(--border);
     background: var(--bg-secondary);
+  }
+
+  .format-selector {
+    display: flex;
+    gap: 0.25rem;
+    background: var(--bg-primary);
+    border-radius: 4px;
+    padding: 0.25rem;
+  }
+
+  .format-btn {
+    padding: 0.25rem 0.75rem;
+    border: none;
+    background: transparent;
+    color: var(--text-secondary);
+    font-size: 0.875rem;
+    font-weight: 500;
+    cursor: pointer;
+    border-radius: 4px;
+    transition: all 0.2s;
+  }
+
+  .format-btn:hover {
+    background: var(--bg-tertiary);
+    color: var(--text-primary);
+  }
+
+  .format-btn.active {
+    background: var(--accent);
+    color: white;
   }
 
 

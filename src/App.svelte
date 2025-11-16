@@ -9,6 +9,9 @@
   import RawView from './components/RawView.svelte';
   import StatsPanel from './components/StatsPanel.svelte';
   import Tabs from './components/Tabs.svelte';
+  import ProgressBar from './components/ProgressBar.svelte';
+  import SettingsDialog from './components/SettingsDialog.svelte';
+  import { compressToToon, decompressFromToon } from './agents/compression/toon';
   import type { TableData } from './agents/store';
   import type { Tab } from './types/tab';
 
@@ -24,6 +27,9 @@
   let isDragging = false;
   let tableViewRef: any = null;
   let isUpdatingFromTab = false;
+  let progress = 0;
+  let progressMessage = '';
+  let showProgress = false;
   let tableState: {
     sortColumn: string | null;
     sortDirection: 'asc' | 'desc';
@@ -35,6 +41,7 @@
   };
   let searchMatchedRowIds: Set<string> = new Set();
   let searchFilteredColumnKeys: string[] | null = null;
+  let showSettings = false;
 
   onMount(() => {
     dataStore.subscribe((value) => {
@@ -42,9 +49,28 @@
         // dataStore 변경 시 현재 활성 탭 업데이트
         const activeTab = tabs.find(t => t.id === activeTabId);
         if (activeTab) {
-          activeTab.data = JSON.parse(JSON.stringify(value));
-          activeTab.isModified = true;
-          tabs = tabs; // Svelte reactivity
+          // 데이터 유효성 검사
+          if (value && value.rows && Array.isArray(value.rows)) {
+            // 대용량 데이터는 .toon으로 압축하여 저장
+            const shouldCompress = value.rows.length > 1000;
+            if (shouldCompress) {
+              activeTab.data = compressToToon(value);
+              activeTab.isCompressed = true;
+            } else {
+              activeTab.data = JSON.parse(JSON.stringify(value));
+              activeTab.isCompressed = false;
+            }
+            activeTab.isModified = true;
+            
+            // 현재 탭의 히스토리도 업데이트
+            const currentHistory = dataStore.getTabHistory();
+            if (currentHistory) {
+              activeTab.history = currentHistory.history;
+              activeTab.historyIndex = currentHistory.historyIndex;
+            }
+            
+            tabs = tabs; // Svelte reactivity
+          }
         }
       }
       data = value;
@@ -66,24 +92,58 @@
   function createNewTab(
     file: File | { path: string; name: string },
     fileData: TableData,
-    fileFormat?: 'json' | 'csv' | 'xml'
+    fileFormat?: 'json' | 'csv' | 'xml' | 'toon'
   ): string {
     const tabId = `tab_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
     const fileName = file instanceof File ? file.name : file.name;
     
     // 파일 형식 감지
-    let format: 'json' | 'csv' | 'xml' | undefined = fileFormat;
+    let format: 'json' | 'csv' | 'xml' | 'toon' | undefined = fileFormat;
     if (!format) {
       const lowerName = fileName.toLowerCase();
       if (lowerName.endsWith('.json')) format = 'json';
       else if (lowerName.endsWith('.csv')) format = 'csv';
       else if (lowerName.endsWith('.xml')) format = 'xml';
+      else if (lowerName.endsWith('.toon')) format = 'toon';
+    }
+    
+    // 데이터 유효성 검사
+    if (!fileData || !fileData.rows || !Array.isArray(fileData.rows)) {
+      throw new Error('유효하지 않은 데이터입니다.');
+    }
+    
+    // 대용량 데이터는 .toon으로 압축하여 저장
+    let shouldCompress = fileData.rows.length > 1000;
+    let tabData: TableData | string;
+    try {
+      if (shouldCompress) {
+        console.log(`[createNewTab] 압축 시작: ${fileName}`, {
+          rowsCount: fileData.rows.length,
+          columnsCount: fileData.columns.length
+        });
+        tabData = compressToToon(fileData);
+        console.log(`[createNewTab] 압축 성공: ${fileName}`, {
+          compressedLength: typeof tabData === 'string' ? tabData.length : undefined
+        });
+      } else {
+        tabData = JSON.parse(JSON.stringify(fileData));
+      }
+    } catch (compressError) {
+      console.error(`[createNewTab] 압축 실패: ${fileName}`, {
+        error: compressError,
+        errorMessage: compressError instanceof Error ? compressError.message : String(compressError)
+      });
+      // 압축 실패 시 압축하지 않고 저장
+      console.warn(`[createNewTab] 압축 실패, 압축 없이 저장: ${fileName}`);
+      tabData = JSON.parse(JSON.stringify(fileData));
+      shouldCompress = false;
     }
     
     const newTab: Tab = {
       id: tabId,
       name: fileName,
-      data: JSON.parse(JSON.stringify(fileData)),
+      data: tabData,
+      isCompressed: shouldCompress,
       isModified: false,
       file: file,
       filePath: file instanceof File ? undefined : file.path,
@@ -99,9 +159,72 @@
     const tab = tabs.find(t => t.id === tabId);
     if (!tab) return;
     
+    // 현재 탭의 히스토리 저장
+    if (activeTabId) {
+      const currentHistory = dataStore.getTabHistory();
+      if (currentHistory) {
+        const currentTab = tabs.find(t => t.id === activeTabId);
+        if (currentTab) {
+          currentTab.history = currentHistory.history;
+          currentTab.historyIndex = currentHistory.historyIndex;
+        }
+      }
+    }
+    
     activeTabId = tabId;
     isUpdatingFromTab = true;
-    dataStore.set(JSON.parse(JSON.stringify(tab.data)));
+    
+    // 새 탭으로 전환
+    dataStore.setCurrentTab(tabId);
+    
+    // 탭의 히스토리 복원 (있으면)
+    if (tab.history && tab.historyIndex !== undefined) {
+      dataStore.restoreTabHistory(tab.history, tab.historyIndex);
+    } else {
+      // 히스토리가 없으면 초기화
+      dataStore.restoreTabHistory([], -1);
+    }
+    
+    // .toon 압축 데이터인 경우 압축 해제
+    let tabData: TableData;
+    try {
+      if (tab.isCompressed && typeof tab.data === 'string') {
+        console.log(`[switchToTab] 압축 해제 시작: ${tab.name}`, {
+          dataLength: tab.data.length,
+          dataPreview: tab.data.substring(0, 100)
+        });
+        tabData = decompressFromToon(tab.data);
+        console.log(`[switchToTab] 압축 해제 성공: ${tab.name}`, {
+          rowsCount: tabData?.rows?.length,
+          columnsCount: tabData?.columns?.length
+        });
+      } else {
+        tabData = typeof tab.data === 'string' 
+          ? JSON.parse(tab.data) 
+          : JSON.parse(JSON.stringify(tab.data));
+      }
+    } catch (decompressError) {
+      console.error(`[switchToTab] 압축 해제 실패: ${tab.name}`, {
+        error: decompressError,
+        errorMessage: decompressError instanceof Error ? decompressError.message : String(decompressError),
+        errorStack: decompressError instanceof Error ? decompressError.stack : undefined,
+        isCompressed: tab.isCompressed,
+        dataType: typeof tab.data,
+        dataLength: typeof tab.data === 'string' ? tab.data.length : undefined
+      });
+      throw new Error(`탭 데이터 압축 해제 실패 (${tab.name}): ${decompressError instanceof Error ? decompressError.message : 'Unknown error'}`);
+    }
+    
+    // 초기 히스토리가 없으면 현재 상태를 히스토리에 추가
+    if (!tab.history || tab.history.length === 0) {
+      const clonedData = JSON.parse(JSON.stringify(tabData));
+      dataStore.restoreTabHistory([{
+        data: clonedData,
+        timestamp: Date.now(),
+      }], 0);
+    }
+    
+    dataStore.set(tabData, true); // skipHistory = true로 설정하여 초기 히스토리 추가 방지
     setTimeout(() => {
       isUpdatingFromTab = false;
     }, 0);
@@ -125,6 +248,23 @@
         }
       }
     }
+    
+    // 탭 데이터 및 히스토리 메모리 정리
+    if (tab.isCompressed && typeof tab.data === 'string') {
+      tab.data = '';
+    } else {
+      tab.data = {
+        columns: [],
+        rows: [],
+        metadata: { rowCount: 0, columnCount: 0, isFlat: true },
+      };
+    }
+    tab.history = undefined;
+    tab.historyIndex = undefined;
+    tab.file = null;
+    
+    // DataStore에서도 히스토리 삭제
+    dataStore.deleteTabHistory(tabId);
     
     tabs = tabs.filter(t => t.id !== tabId);
     
@@ -152,11 +292,31 @@
 
   async function handleFileDrop(file: File | { path: string; name: string }) {
     try {
-      const result = await importFile(file);
+      showProgress = true;
+      progress = 0;
+      progressMessage = '파일 읽는 중...';
+      
+      const result = await importFile(file, (prog, msg) => {
+        progress = prog;
+        progressMessage = msg;
+      });
+      
+      // 데이터 유효성 검사
+      if (!result || !result.data) {
+        throw new Error('파일 데이터를 읽을 수 없습니다.');
+      }
+      
+      if (!result.data.rows || !Array.isArray(result.data.rows)) {
+        throw new Error('유효하지 않은 데이터 형식입니다.');
+      }
+      
       // 항상 새 탭으로 열기
       createNewTab(file, result.data, result.format);
       switchToTab(activeTabId!);
+      
+      showProgress = false;
     } catch (error) {
+      showProgress = false;
       alert(`파일 읽기 실패: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   }
@@ -168,9 +328,19 @@
     if (!tab) return;
 
     try {
+      // 탭 데이터를 TableData로 변환
+      let tabData: TableData;
+      if (tab.isCompressed && typeof tab.data === 'string') {
+        tabData = decompressFromToon(tab.data);
+      } else {
+        tabData = typeof tab.data === 'string' 
+          ? JSON.parse(tab.data) 
+          : tab.data;
+      }
+
       if (tab.filePath && tab.fileFormat) {
         // 원본 파일에 저장
-        const result = await saveFile(tab.data, tab.filePath, tab.fileFormat);
+        const result = await saveFile(tabData, tab.filePath, tab.fileFormat);
         if (result.saved) {
           tab.isModified = false;
           tabs = tabs; // Svelte reactivity
@@ -178,7 +348,7 @@
       } else {
         // Save As
         const format = tab.fileFormat || 'json';
-        const result = await saveFileAs(tab.data, format, tab.name);
+        const result = await saveFileAs(tabData, format, tab.name);
         if (result.saved && result.filePath) {
           tab.filePath = result.filePath;
           tab.isModified = false;
@@ -200,8 +370,18 @@
     if (!tab) return;
 
     try {
+      // 탭 데이터를 TableData로 변환
+      let tabData: TableData;
+      if (tab.isCompressed && typeof tab.data === 'string') {
+        tabData = decompressFromToon(tab.data);
+      } else {
+        tabData = typeof tab.data === 'string' 
+          ? JSON.parse(tab.data) 
+          : tab.data;
+      }
+
       const format = tab.fileFormat || 'json';
-      const result = await saveFileAs(tab.data, format, tab.name);
+      const result = await saveFileAs(tabData, format, tab.name);
       if (result.saved && result.filePath) {
         tab.filePath = result.filePath;
         tab.isModified = false;
@@ -227,7 +407,7 @@
     isDragging = false;
   }
 
-  function handleDrop(event: DragEvent) {
+  async function handleDrop(event: DragEvent) {
     event.preventDefault();
     event.stopPropagation();
     isDragging = false;
@@ -235,21 +415,32 @@
     const files = event.dataTransfer?.files;
     if (files && files.length > 0) {
       // 여러 파일을 동시에 드롭한 경우 모두 처리
-      Array.from(files).forEach(async (file) => {
+      for (const file of Array.from(files)) {
         const fileName = file.name.toLowerCase();
-        if (fileName.endsWith('.json') || fileName.endsWith('.csv') || fileName.endsWith('.xml')) {
+        if (fileName.endsWith('.json') || fileName.endsWith('.csv') || fileName.endsWith('.xml') || fileName.endsWith('.toon')) {
           try {
-            const result = await importFile(file);
+            showProgress = true;
+            progress = 0;
+            progressMessage = `${file.name} 읽는 중...`;
+            
+            const result = await importFile(file, (prog, msg) => {
+              progress = prog;
+              progressMessage = `${file.name}: ${msg}`;
+            });
+            
             createNewTab(file, result.data, result.format);
             if (file === files[files.length - 1]) {
               // 마지막 파일을 활성 탭으로 설정
               switchToTab(activeTabId!);
             }
+            
+            showProgress = false;
           } catch (error) {
+            showProgress = false;
             alert(`파일 읽기 실패 (${file.name}): ${error instanceof Error ? error.message : 'Unknown error'}`);
           }
         }
-      });
+      }
     }
   }
 </script>
@@ -271,6 +462,9 @@
     on:searchChange={(e) => {
       searchMatchedRowIds = e.detail.matchedRowIds;
       searchFilteredColumnKeys = e.detail.filteredColumnKeys;
+    }}
+    on:openSettings={() => {
+      showSettings = true;
     }}
   />
   {#if tabs.length > 0}
@@ -347,6 +541,8 @@
       </div>
     {/if}
   </main>
+  <ProgressBar progress={progress} message={progressMessage} visible={showProgress} />
+  <SettingsDialog isOpen={showSettings} onClose={() => { showSettings = false; }} />
 </div>
 
 <style>

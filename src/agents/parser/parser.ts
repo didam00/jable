@@ -4,24 +4,163 @@
 import Papa from 'papaparse';
 import type { TableData, Column, Row, Cell } from '../store/types';
 
-export function parseJSON(jsonString: string): TableData {
+export interface ProgressDetails {
+  stage: 'loading' | 'parsing' | 'converting' | 'compressing' | 'complete';
+  current: number;
+  total: number;
+  stageProgress: number;
+}
+
+export type ProgressCallback = (
+  progress: number,
+  message: string,
+  details?: ProgressDetails
+) => void;
+
+export function parseJSON(jsonString: string, onProgress?: ProgressCallback): TableData {
   try {
-    const data = JSON.parse(jsonString);
-    return convertToTableData(data);
+    onProgress?.(10, 'JSON 파싱 중...');
+    
+    // JSON 파싱 시도
+    let data: any;
+    try {
+      const trimmed = jsonString.trim();
+      // Base64처럼 보이는 문자열이면 경고
+      if (trimmed.match(/^[A-Za-z0-9+/=]+$/) && trimmed.length > 100 && !trimmed.startsWith('{') && !trimmed.startsWith('[')) {
+        throw new Error('파일 내용이 Base64로 인코딩된 것 같습니다. .toon 파일 형식일 수 있습니다.');
+      }
+      data = JSON.parse(trimmed);
+    } catch (parseError) {
+      const errorMsg = parseError instanceof Error ? parseError.message : 'Unknown error';
+      throw new Error(`JSON 파싱 실패: ${errorMsg}`);
+    }
+    
+    // 파싱 결과가 문자열이면 에러 (JSON은 객체나 배열이어야 함)
+    if (typeof data === 'string') {
+      throw new Error('JSON 파싱 결과가 문자열입니다. 유효한 JSON 객체나 배열이 아닙니다.');
+    }
+    
+    onProgress?.(50, '데이터 구조 분석 중...');
+    
+    // convertToTableData 호출
+    let result: TableData;
+    try {
+      console.log(`[parseJSON] convertToTableData 호출 시작`, { dataType: typeof data, isArray: Array.isArray(data) });
+      result = convertToTableData(data, onProgress);
+      console.log(`[parseJSON] convertToTableData 성공`, {
+        rowsCount: result?.rows?.length,
+        columnsCount: result?.columns?.length,
+        hasMetadata: !!result?.metadata
+      });
+    } catch (convertError) {
+      // convertToTableData에서 발생한 에러는 JSON 변환 오류로 처리
+      const errorMsg = convertError instanceof Error ? convertError.message : 'Unknown error';
+      console.error(`[parseJSON] convertToTableData 실패:`, errorMsg);
+      throw new Error(`JSON을 테이블 데이터로 변환 실패: ${errorMsg}`);
+    }
+    
+    // 결과 유효성 검사
+    console.log(`[parseJSON] 결과 유효성 검사 시작`);
+    if (!result || typeof result !== 'object') {
+      console.error(`[parseJSON] 결과가 객체가 아님:`, { result, resultType: typeof result });
+      throw new Error('JSON을 테이블 데이터로 변환 실패: 결과가 객체가 아닙니다');
+    }
+    
+    if (!result.rows || !Array.isArray(result.rows)) {
+      console.error(`[parseJSON] rows 배열이 없거나 유효하지 않음:`, { rows: result.rows, rowsType: typeof result.rows });
+      throw new Error('JSON을 테이블 데이터로 변환 실패: rows 배열이 없거나 유효하지 않습니다');
+    }
+    
+    if (!result.columns || !Array.isArray(result.columns)) {
+      console.error(`[parseJSON] columns 배열이 없거나 유효하지 않음:`, { columns: result.columns, columnsType: typeof result.columns });
+      throw new Error('JSON을 테이블 데이터로 변환 실패: columns 배열이 없거나 유효하지 않습니다');
+    }
+    
+    if (!result.metadata || typeof result.metadata !== 'object') {
+      console.error(`[parseJSON] metadata가 없거나 유효하지 않음:`, { metadata: result.metadata, metadataType: typeof result.metadata });
+      throw new Error('JSON을 테이블 데이터로 변환 실패: metadata가 없거나 유효하지 않습니다');
+    }
+    
+    console.log(`[parseJSON] 모든 검증 통과`);
+    onProgress?.(100, '완료');
+    return result;
   } catch (e) {
-    throw new Error(`Invalid JSON: ${e instanceof Error ? e.message : 'Unknown error'}`);
+    console.error(`[parseJSON] 예외 발생:`, {
+      error: e,
+      message: e instanceof Error ? e.message : String(e),
+      stack: e instanceof Error ? e.stack : undefined
+    });
+    
+    // .toon 형식 오류는 절대 발생하지 않아야 함 (JSON 파싱이므로)
+    // 만약 발생한다면 다른 곳에서 잘못 전달된 것
+    if (e instanceof Error && e.message.includes('Invalid .toon format')) {
+      // 이 경우는 예상치 못한 상황이므로 원래 에러를 감싸서 전달
+      console.error(`[parseJSON] 예상치 못한 .toon 형식 오류 발생!`);
+      throw new Error(`JSON 파싱 중 예상치 못한 오류: ${e.message}`);
+    }
+    // 일반적인 JSON 파싱 오류
+    throw e instanceof Error ? e : new Error(`Invalid JSON: ${String(e)}`);
   }
 }
 
-export function parseCSV(csvString: string): TableData {
+export function parseCSV(csvString: string, onProgress?: ProgressCallback): TableData {
   try {
+    onProgress?.(5, 'CSV 파싱 준비 중...');
+    
+    let totalRows = 0;
+    let processedRows = 0;
+    const rows: Row[] = [];
+    let headers: string[] = [];
+    let columns: Column[] = [];
+    
     const result = Papa.parse(csvString, {
       header: true,
       skipEmptyLines: true,
       transformHeader: (header: string) => header.trim(),
+      step: (result: Papa.ParseStepResult<Record<string, unknown>>) => {
+        if (!headers.length && result.meta.fields) {
+          headers = result.meta.fields;
+          columns = headers.map((header: string, index: number) => ({
+            key: header || `col_${index}`,
+            label: header || `Column ${index + 1}`,
+            type: 'string',
+          }));
+          onProgress?.(10, 'CSV 헤더 분석 완료');
+        }
+        
+        if (result.data) {
+          const item = result.data as Record<string, unknown>;
+          const cells: Record<string, Cell> = {};
+          headers.forEach((header: string) => {
+            const value = item[header];
+            cells[header] = {
+              value: value ?? '',
+              type: inferType(value),
+            };
+          });
+          rows.push({
+            id: `row_${rows.length}`,
+            cells,
+          });
+          
+          processedRows++;
+          // 진행률 업데이트 (10% ~ 90%)
+          if (processedRows % 100 === 0 || processedRows === 1) {
+            const progress = Math.min(90, 10 + (processedRows / Math.max(1, totalRows || processedRows * 2)) * 80);
+            onProgress?.(progress, `행 처리 중: ${processedRows.toLocaleString()}개`);
+          }
+        }
+      },
+      complete: () => {
+        // Papa.parse의 step 콜백에서 처리됨
+      },
     });
+    
+    // 전체 행 수 추정 (정확하지 않을 수 있음)
+    totalRows = rows.length;
 
-    if (!result.data || result.data.length === 0) {
+    if (rows.length === 0) {
+      onProgress?.(100, '완료');
       return {
         columns: [],
         rows: [],
@@ -29,29 +168,9 @@ export function parseCSV(csvString: string): TableData {
       };
     }
 
-    const headers: string[] = result.meta.fields || [];
-    const columns: Column[] = headers.map((header: string, index: number) => ({
-      key: header || `col_${index}`,
-      label: header || `Column ${index + 1}`,
-      type: 'string',
-    }));
-
-    const rows: Row[] = (result.data as Record<string, unknown>[]).map((item, rowIndex) => {
-      const cells: Record<string, Cell> = {};
-      headers.forEach((header: string) => {
-        const value = item[header];
-        cells[header] = {
-          value: value ?? '',
-          type: inferType(value),
-        };
-      });
-      return {
-        id: `row_${rowIndex}`,
-        cells,
-      };
-    });
-
-    return {
+    onProgress?.(95, '데이터 정리 중...');
+    
+    const finalResult = {
       columns,
       rows,
       metadata: {
@@ -60,12 +179,15 @@ export function parseCSV(csvString: string): TableData {
         isFlat: true,
       },
     };
+    
+    onProgress?.(100, '완료');
+    return finalResult;
   } catch (e) {
     throw new Error(`CSV 파싱 실패: ${e instanceof Error ? e.message : 'Unknown error'}`);
   }
 }
 
-function convertToTableData(data: any): TableData {
+function convertToTableData(data: any, onProgress?: ProgressCallback): TableData {
   if (Array.isArray(data)) {
     if (data.length === 0) {
       return {
@@ -75,13 +197,39 @@ function convertToTableData(data: any): TableData {
       };
     }
 
+    const totalItems = data.length;
+    onProgress?.(60, `데이터 구조 분석 중 (${totalItems.toLocaleString()}개 항목)...`);
+
     const firstItem = data[0];
+    if (!firstItem || typeof firstItem !== 'object') {
+      throw new Error('Invalid data: first item is not an object');
+    }
+    
     const isFlat = isFlatObject(firstItem);
     const columns = extractColumns(firstItem, isFlat);
-    const rows: Row[] = data.map((item, index) => ({
-      id: `row_${index}`,
-      cells: extractCells(item, columns),
-    }));
+    
+    if (!columns || !Array.isArray(columns)) {
+      throw new Error('Invalid data: failed to extract columns');
+    }
+    
+    onProgress?.(70, `컬럼 추출 완료 (${columns.length}개)`);
+    
+    const rows: Row[] = [];
+    const batchSize = Math.max(100, Math.floor(totalItems / 100)); // 100개씩 또는 1%씩
+    
+    for (let i = 0; i < data.length; i++) {
+      const item = data[i];
+      rows.push({
+        id: `row_${i}`,
+        cells: extractCells(item, columns),
+      });
+      
+      // 진행률 업데이트 (70% ~ 95%)
+      if ((i + 1) % batchSize === 0 || i === data.length - 1) {
+        const progress = 70 + ((i + 1) / totalItems) * 25;
+        onProgress?.(progress, `행 처리 중: ${(i + 1).toLocaleString()} / ${totalItems.toLocaleString()}`);
+      }
+    }
 
     return {
       columns,
@@ -95,6 +243,10 @@ function convertToTableData(data: any): TableData {
   } else if (typeof data === 'object' && data !== null) {
     const isFlat = isFlatObject(data);
     const columns = extractColumns(data, isFlat);
+    
+    if (!columns || !Array.isArray(columns)) {
+      throw new Error('Invalid data: failed to extract columns');
+    }
 
     const rows: Row[] = [
       {
@@ -135,8 +287,21 @@ function isFlatObject(obj: any): boolean {
 }
 
 function extractColumns(obj: any, isFlat: boolean): Column[] {
+  // null/undefined 체크
+  if (obj === null || obj === undefined) {
+    return [];
+  }
+  
+  if (typeof obj !== 'object') {
+    return [];
+  }
+  
   if (isFlat) {
-    return Object.keys(obj).map((key) => ({
+    const keys = Object.keys(obj);
+    if (keys.length === 0) {
+      return [];
+    }
+    return keys.map((key) => ({
       key,
       label: key,
       type: inferType(obj[key]),
@@ -284,11 +449,14 @@ export function exportToCSV(data: TableData): string {
   return lines.join('\n');
 }
 
-export function parseXML(xmlString: string): TableData {
+export function parseXML(xmlString: string, onProgress?: ProgressCallback): TableData {
   try {
+    onProgress?.(10, 'XML 파싱 중...');
     const parser = new DOMParser();
     const xmlDoc = parser.parseFromString(xmlString, 'text/xml');
 
+    onProgress?.(30, 'XML 구조 분석 중...');
+    
     // 파싱 에러 확인
     const parseError = xmlDoc.querySelector('parsererror');
     if (parseError) {
@@ -297,6 +465,7 @@ export function parseXML(xmlString: string): TableData {
 
     const root = xmlDoc.documentElement;
     if (!root) {
+      onProgress?.(100, '완료');
       return {
         columns: [],
         rows: [],
@@ -308,15 +477,27 @@ export function parseXML(xmlString: string): TableData {
     const children = Array.from(root.children);
     if (children.length === 0) {
       // 루트 요소 자체가 데이터인 경우
-      return convertXMLNodeToTableData(root);
+      onProgress?.(50, '루트 요소 분석 중...');
+      const result = convertXMLNodeToTableData(root);
+      onProgress?.(100, '완료');
+      return result;
     }
 
+    onProgress?.(40, `컬럼 추출 중 (${children.length.toLocaleString()}개 요소)...`);
+    
     // 첫 번째 자식 요소의 구조를 분석하여 컬럼 추출
     const firstChild = children[0];
     const columns = extractXMLColumns(firstChild);
 
+    onProgress?.(50, `컬럼 추출 완료 (${columns.length}개)`);
+
     // 모든 자식 요소를 행으로 변환
-    const rows: Row[] = children.map((child, index) => {
+    const rows: Row[] = [];
+    const totalChildren = children.length;
+    const batchSize = Math.max(100, Math.floor(totalChildren / 100));
+    
+    for (let index = 0; index < children.length; index++) {
+      const child = children[index];
       const cells: Record<string, Cell> = {};
       columns.forEach((col) => {
         const value = getXMLNodeValue(child, col.key);
@@ -325,13 +506,21 @@ export function parseXML(xmlString: string): TableData {
           type: inferType(value),
         };
       });
-      return {
+      rows.push({
         id: `row_${index}`,
         cells,
-      };
-    });
+      });
+      
+      // 진행률 업데이트 (50% ~ 95%)
+      if ((index + 1) % batchSize === 0 || index === children.length - 1) {
+        const progress = 50 + ((index + 1) / totalChildren) * 45;
+        onProgress?.(progress, `행 처리 중: ${(index + 1).toLocaleString()} / ${totalChildren.toLocaleString()}`);
+      }
+    }
 
-    return {
+    onProgress?.(98, '데이터 정리 중...');
+    
+    const result = {
       columns,
       rows,
       metadata: {
@@ -340,6 +529,9 @@ export function parseXML(xmlString: string): TableData {
         isFlat: true,
       },
     };
+    
+    onProgress?.(100, '완료');
+    return result;
   } catch (e) {
     throw new Error(`XML 파싱 실패: ${e instanceof Error ? e.message : 'Unknown error'}`);
   }

@@ -10,6 +10,7 @@
     save: void;
     saveAs: void;
     searchChange: { matchedRowIds: Set<string>; filteredColumnKeys: string[] | null };
+    openSettings: void;
   }>();
 
   let fileInput: HTMLInputElement;
@@ -31,7 +32,7 @@
           multiple: true,
           filters: [{
             name: 'Data Files',
-            extensions: ['json', 'csv', 'xml'],
+            extensions: ['json', 'csv', 'xml', 'toon'],
           }],
         });
 
@@ -75,7 +76,7 @@
     }
   }
 
-  async function handleExport(format: 'json' | 'csv' | 'xml') {
+  async function handleExport(format: 'json' | 'csv' | 'xml' | 'toon') {
     dataStore.subscribe(async (data) => {
       try {
         await exportFile(data, format);
@@ -103,7 +104,7 @@
       <input
         bind:this={fileInput}
         type="file"
-        accept=".json,.csv,.xml"
+        accept=".json,.csv,.xml,.toon"
         on:change={handleFileUpload}
         style="display: none;"
       />
@@ -129,9 +130,14 @@
   <SearchBar on:searchChange={(e) => dispatch('searchChange', e.detail)} />
   <div class="toolbar-right">
     export as
+    <button class="btn" on:click={() => handleExport('toon')}>TOON</button><span class="split">|</span>
     <button class="btn" on:click={() => handleExport('json')}>JSON</button><span class="split">|</span>
     <button class="btn" on:click={() => handleExport('csv')}>CSV</button><span class="split">|</span>
     <button class="btn" on:click={() => handleExport('xml')}>XML</button>
+    <div class="divider"></div>
+    <button class="btn-icon" on:click={() => dispatch('openSettings')} title="설정">
+      <span class="material-icons">settings</span>
+    </button>
   </div>
 </header>
 

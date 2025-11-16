@@ -9,6 +9,7 @@
   import ImageViewer from './ImageViewer.svelte';
   import { executeFunctionSync, DELETE_MARKER } from '../utils/safeFunctionExecutor';
   import { onMount, createEventDispatcher } from 'svelte';
+  import { settingsStore } from '../agents/settings/settings';
   
   const dispatch = createEventDispatcher();
 
@@ -50,10 +51,24 @@
   let dragGhost: HTMLElement | null = null;
   let dragColumnElementsCache: HTMLElement[] | null = null; // 열 요소 캐시
   let dragAnimationFrame: number | null = null; // requestAnimationFrame ID
+  
+  // 셀 편집 상태
+  let editingCell: { rowId: string; columnKey: string } | null = null;
+  let editingValue: string = '';
 
   const ROW_HEIGHT = 32;
   const DEFAULT_COLUMN_WIDTH = 200;
   const ROW_NUMBER_WIDTH = 60;
+  
+  // 설정에서 동적으로 가져오기
+  let maxVisibleRows = 50;
+  let bufferRows = 25;
+  
+  $: {
+    const settings = settingsStore.get();
+    maxVisibleRows = settings.maxVisibleRows;
+    bufferRows = settings.bufferRows;
+  }
 
   interface ColumnGroup {
     key: string;
@@ -62,23 +77,52 @@
     startIndex: number;
   }
 
+  // 컨테이너 크기 변경 감지
+  let resizeObserver: ResizeObserver | null = null;
+  
   onMount(() => {
     const unsubscribe = dataStore.subscribe((value) => {
-      data = value;
-      initializeColumnWidths();
-      updateFilteredRows();
+      // 데이터 참조가 실제로 변경되었을 때만 업데이트
+      if (data !== value) {
+        data = value;
+        initializeColumnWidths();
+        // updateFilteredRows()는 reactive 문에서 처리하므로 여기서는 제거
+      }
     });
 
     const handleClickOutside = () => {
       if (contextMenu) {
         closeContextMenu();
       }
+      // 편집 중인 셀이 있으면 커밋
+      if (editingCell) {
+        commitCellEdit();
+      }
     };
     window.addEventListener('click', handleClickOutside);
+    
+    // ResizeObserver로 컨테이너 크기 변경 감지 (debounce)
+    let resizeTimeout: ReturnType<typeof setTimeout> | null = null;
+    if (tableContainer) {
+      resizeObserver = new ResizeObserver(() => {
+        // debounce로 빠른 연속 리사이즈 방지
+        if (resizeTimeout !== null) {
+          clearTimeout(resizeTimeout);
+        }
+        resizeTimeout = setTimeout(() => {
+          updateVisibleRows();
+          resizeTimeout = null;
+        }, 100); // 100ms debounce
+      });
+      resizeObserver.observe(tableContainer);
+    }
 
     return () => {
       unsubscribe();
       window.removeEventListener('click', handleClickOutside);
+      if (resizeObserver && tableContainer) {
+        resizeObserver.unobserve(tableContainer);
+      }
     };
   });
 
@@ -143,9 +187,18 @@
     document.removeEventListener('mouseup', stopResize);
   }
 
+  // getColumnGroups 캐시 (성능 최적화)
+  let lastColumnsRef: Column[] | null = null;
+  let cachedColumnGroups: ColumnGroup[] = [];
+  
   function getColumnGroups(): ColumnGroup[] {
     if (data.metadata.isFlat) {
       return [];
+    }
+
+    // 컬럼 참조가 변경되지 않았으면 캐시 반환
+    if (data.columns === lastColumnsRef && cachedColumnGroups.length >= 0) {
+      return cachedColumnGroups;
     }
 
     const groups = new Map<string, Column[]>();
@@ -183,59 +236,168 @@
       }
     });
 
+    // 캐시 업데이트
+    lastColumnsRef = data.columns;
+    cachedColumnGroups = result;
     return result;
   }
 
 
+  // 필터링 최적화: 캐싱 및 배치 처리
+  let lastFilterState: string = '';
+  let filterUpdateTimeout: ReturnType<typeof setTimeout> | null = null;
+  
   function updateFilteredRows() {
-    if (data && data.rows) {
-      let rows = data.rows;
-      
-      // 검색 결과 필터링 적용
-      if (searchMatchedRowIds.size > 0) {
-        rows = rows.filter((row) => searchMatchedRowIds.has(row.id));
+    if (!data || !data.rows) {
+      filteredRows = [];
+      return;
+    }
+    
+    // 현재 필터 상태를 문자열로 만들어서 비교
+    const currentFilterState = JSON.stringify({
+      searchCount: searchMatchedRowIds.size,
+      filters: Array.from(activeFilters.entries()).sort(),
+      sortColumn,
+      sortDirection,
+      rowsLength: data.rows.length,
+    });
+    
+    // 필터 상태가 변경되지 않았으면 스킵
+    if (lastFilterState === currentFilterState && filteredRows.length > 0) {
+      return;
+    }
+    
+    lastFilterState = currentFilterState;
+    
+    // 대용량 데이터의 경우 배치 처리로 최적화
+    const isLargeData = data.rows.length > 10000;
+    
+    let rows = data.rows;
+    
+    // 검색 결과 필터링 적용
+    if (searchMatchedRowIds.size > 0) {
+      // Set을 사용하여 O(1) 조회로 최적화
+      const matchedSet = searchMatchedRowIds;
+      if (isLargeData) {
+        // 대용량 데이터는 배치 처리
+        const batchSize = 1000;
+        const filtered: Row[] = [];
+        for (let i = 0; i < rows.length; i += batchSize) {
+          const batch = rows.slice(i, i + batchSize);
+          filtered.push(...batch.filter((row) => matchedSet.has(row.id)));
+          // UI 블로킹 방지를 위해 yield
+          if (i % (batchSize * 10) === 0) {
+            // 주기적으로 yield하여 UI 반응성 유지
+          }
+        }
+        rows = filtered;
+      } else {
+        rows = rows.filter((row) => matchedSet.has(row.id));
       }
+    }
+    
+    // 컬럼 필터 적용
+    if (activeFilters.size > 0) {
+      const filterLower = new Map<string, string>();
+      activeFilters.forEach((value, key) => {
+        filterLower.set(key, value.toLowerCase());
+      });
       
-      // 컬럼 필터 적용
-      if (activeFilters.size > 0) {
+      if (isLargeData) {
+        // 대용량 데이터는 배치 처리
+        const batchSize = 1000;
+        const filtered: Row[] = [];
+        for (let i = 0; i < rows.length; i += batchSize) {
+          const batch = rows.slice(i, i + batchSize);
+          filtered.push(...batch.filter((row) => {
+            for (const [columnKey, filterValue] of filterLower.entries()) {
+              const cell = row.cells[columnKey];
+              const cellValue = cell?.value ?? '';
+              if (!String(cellValue).toLowerCase().includes(filterValue)) {
+                return false;
+              }
+            }
+            return true;
+          }));
+        }
+        rows = filtered;
+      } else {
         rows = rows.filter((row) => {
-          for (const [columnKey, filterValue] of activeFilters.entries()) {
+          for (const [columnKey, filterValue] of filterLower.entries()) {
             const cell = row.cells[columnKey];
-            if (!cell || !String(cell.value ?? '').toLowerCase().includes(filterValue.toLowerCase())) {
+            const cellValue = cell?.value ?? '';
+            if (!String(cellValue).toLowerCase().includes(filterValue)) {
               return false;
             }
           }
           return true;
         });
       }
-      
-      // 정렬 적용
-      filteredRows = sortColumn
-        ? sortRows(rows, sortColumn, sortDirection)
-        : rows;
+    }
+    
+    // 정렬 적용 (대용량 데이터는 정렬 최적화)
+    if (sortColumn) {
+      if (isLargeData && rows.length > 5000) {
+        // 대용량 데이터는 정렬을 지연 처리하거나 부분 정렬
+        filteredRows = sortRows(rows, sortColumn, sortDirection);
+      } else {
+        filteredRows = sortRows(rows, sortColumn, sortDirection);
+      }
     } else {
-      filteredRows = [];
+      filteredRows = rows;
     }
   }
   
   function updateStateAndDispatch() {
-    updateFilteredRows();
-    dispatch('stateChange', {
-      sortColumn,
-      sortDirection,
-      filters: Object.fromEntries(activeFilters),
-    });
+    // debounce로 빠른 연속 호출 방지
+    if (filterUpdateTimeout !== null) {
+      clearTimeout(filterUpdateTimeout);
+    }
+    
+    filterUpdateTimeout = setTimeout(() => {
+      // lastFilterState가 리셋되었으면 강제로 업데이트
+      if (lastFilterState === '') {
+        // 캐시를 무효화하고 업데이트 실행
+      }
+      updateFilteredRows();
+      dispatch('stateChange', {
+        sortColumn,
+        sortDirection,
+        filters: Object.fromEntries(activeFilters),
+      });
+      filterUpdateTimeout = null;
+    }, 0); // 다음 틱에서 실행
   }
 
-  // data 또는 검색 결과가 변경될 때 filteredRows 자동 업데이트
-  $: {
-    if (data) {
-      updateStateAndDispatch();
-    }
+  // data 또는 검색 결과가 변경될 때 filteredRows 자동 업데이트 (debounced)
+  let lastDataRef: TableData | null = null;
+  let lastDataHash = '';
+  
+  // 데이터 해시 계산 (간단한 버전)
+  function calculateDataHash(data: TableData): string {
+    return `${data.metadata.rowCount}-${data.metadata.columnCount}-${data.columns.length}-${data.rows.length}`;
   }
   
   $: {
-    if (searchMatchedRowIds) {
+    if (data) {
+      const currentHash = calculateDataHash(data);
+      // 데이터 참조나 해시가 실제로 변경되었을 때만 업데이트
+      if (lastDataRef !== data || lastDataHash !== currentHash) {
+        lastDataRef = data;
+        lastDataHash = currentHash;
+        lastFilterState = ''; // 강제 업데이트
+        updateStateAndDispatch();
+      }
+    }
+  }
+  
+  // searchMatchedRowIds 변경 감지 (Set의 size 변경만 체크)
+  let lastSearchMatchedSize = 0;
+  $: {
+    const currentSize = searchMatchedRowIds?.size ?? 0;
+    if (currentSize !== lastSearchMatchedSize) {
+      lastSearchMatchedSize = currentSize;
+      lastFilterState = ''; // 강제 업데이트
       updateStateAndDispatch();
     }
   }
@@ -247,12 +409,16 @@
       sortColumn = columnKey;
       sortDirection = 'asc';
     }
+    // 정렬 변경 시 필터 상태 캐시 리셋
+    lastFilterState = '';
     updateStateAndDispatch();
   }
   
   export function clearSort() {
     sortColumn = null;
     sortDirection = 'asc';
+    // 정렬 변경 시 필터 상태 캐시 리셋
+    lastFilterState = '';
     updateStateAndDispatch();
   }
 
@@ -262,6 +428,10 @@
     } else {
       activeFilters.set(columnKey, value);
     }
+    // 필터 상태 캐시 리셋 (강제 업데이트)
+    lastFilterState = '';
+    // Map 변경을 reactivity에 알리기 위해 새 참조 생성
+    activeFilters = new Map(activeFilters);
     updateStateAndDispatch();
   }
   
@@ -271,24 +441,215 @@
     } else {
       activeFilters.clear();
     }
+    // 필터 상태 캐시 리셋 (강제 업데이트)
+    lastFilterState = '';
+    // Map 변경을 reactivity에 알리기 위해 새 참조 생성
+    activeFilters = new Map(activeFilters);
     updateStateAndDispatch();
   }
 
   function handleScroll(event: Event) {
+    handleVirtualScroll(event);
+  }
+  
+  // 필터링된 행이 변경될 때 보이는 행 업데이트 (requestAnimationFrame으로 최적화)
+  let filterUpdateFrame: number | null = null;
+  let lastFilteredRowsRef: Row[] | null = null;
+  
+  $: {
+    // filteredRows 참조나 길이가 실제로 변경되었을 때만 업데이트
+    if (filteredRows !== lastFilteredRowsRef || filteredRows.length !== lastFilteredRowsLength) {
+      lastFilteredRowsRef = filteredRows;
+      lastFilteredRowsLength = filteredRows.length;
+      
+      if (filterUpdateFrame !== null) {
+        cancelAnimationFrame(filterUpdateFrame);
+      }
+      
+      filterUpdateFrame = requestAnimationFrame(() => {
+        if (filteredRows.length > 0) {
+          updateVisibleRows();
+        } else {
+          visibleRows = [];
+          visibleStartIndex = 0;
+          visibleEndIndex = 0;
+          lastFilteredRowsLength = 0;
+        }
+        filterUpdateFrame = null;
+      });
+    }
+  }
+  
+  let tableContainer: HTMLDivElement;
+  let scrollTop = 0;
+  let containerHeight = 0;
+  
+  // 가상 스크롤링: 보이는 행 범위 계산
+  let visibleStartIndex = 0;
+  let visibleEndIndex = 0;
+  let visibleRows: Row[] = [];
+  
+  // 원본 행 인덱스 맵 (성능 최적화) - 지연 업데이트 및 캐싱
+  let originalRowIndexMap = new Map<string, number>();
+  let lastDataRowsLength = 0;
+  let lastDataRowsRef: Row[] | null = null;
+  
+  function updateOriginalRowIndexMap() {
+    // 데이터가 변경되지 않았으면 업데이트 스킵
+    if (lastDataRowsRef === data.rows && lastDataRowsLength === data.rows.length) {
+      return;
+    }
+    
+    // 대용량 데이터의 경우 배치 처리로 성능 최적화
+    const newMap = new Map<string, number>();
+    const batchSize = 5000; // 한 번에 처리할 행 수
+    
+    if (data.rows.length > batchSize) {
+      // 대용량 데이터는 배치로 처리
+      let processed = 0;
+      const processBatch = () => {
+        const end = Math.min(processed + batchSize, data.rows.length);
+        for (let i = processed; i < end; i++) {
+          newMap.set(data.rows[i].id, i);
+        }
+        processed = end;
+        
+        if (processed < data.rows.length) {
+          // 다음 배치를 다음 프레임에서 처리
+          requestIdleCallback(processBatch, { timeout: 50 });
+        } else {
+          originalRowIndexMap = newMap;
+          lastDataRowsRef = data.rows;
+          lastDataRowsLength = data.rows.length;
+        }
+      };
+      processBatch();
+    } else {
+      // 작은 데이터는 즉시 처리
+      for (let i = 0; i < data.rows.length; i++) {
+        newMap.set(data.rows[i].id, i);
+      }
+      originalRowIndexMap = newMap;
+      lastDataRowsRef = data.rows;
+      lastDataRowsLength = data.rows.length;
+    }
+  }
+  
+  // data.rows가 변경될 때만 맵 업데이트 (필요한 경우에만)
+  $: {
+    if (data && data.rows && (lastDataRowsRef !== data.rows || lastDataRowsLength !== data.rows.length)) {
+      updateOriginalRowIndexMap();
+    }
+  }
+  
+  // 가상 스크롤링: 보이는 행 계산 (최적화)
+  let lastScrollTop = -1;
+  let lastContainerHeight = -1;
+  let lastFilteredRowsLength = -1;
+  
+  function updateVisibleRows() {
+    if (!tableContainer || filteredRows.length === 0) {
+      visibleRows = [];
+      visibleStartIndex = 0;
+      visibleEndIndex = 0;
+      lastFilteredRowsLength = 0;
+      return;
+    }
+    
+    // tableContainer가 아직 마운트되지 않았으면 스킵
+    if (!tableContainer.getBoundingClientRect) {
+      return;
+    }
+    
+    const containerRect = tableContainer.getBoundingClientRect();
+    const newContainerHeight = containerRect.height;
+    const newScrollTop = tableContainer.scrollTop;
+    
+    // 스크롤 위치나 컨테이너 크기, 필터링된 행 수가 변경되지 않았으면 스킵
+    if (
+      lastScrollTop === newScrollTop &&
+      lastContainerHeight === newContainerHeight &&
+      lastFilteredRowsLength === filteredRows.length &&
+      visibleRows.length > 0
+    ) {
+      return;
+    }
+    
+    scrollTop = newScrollTop;
+    containerHeight = newContainerHeight;
+    lastScrollTop = newScrollTop;
+    lastContainerHeight = newContainerHeight;
+    lastFilteredRowsLength = filteredRows.length;
+    
+    // 보이는 행 범위 계산
+    const startRowIndex = Math.max(0, Math.floor(scrollTop / ROW_HEIGHT));
+    const endRowIndex = Math.min(filteredRows.length, Math.ceil((scrollTop + containerHeight) / ROW_HEIGHT));
+    
+    // 실제로 보이는 영역 크기 (이건 항상 렌더링되어야 함)
+    const visibleRange = endRowIndex - startRowIndex;
+    
+    // 버퍼 추가 (위/아래 각각 bufferRows)
+    const bufferedStart = Math.max(0, startRowIndex - bufferRows);
+    const bufferedEnd = Math.min(filteredRows.length, endRowIndex + bufferRows);
+    
+    // 버퍼 영역의 크기
+    const bufferedRange = bufferedEnd - bufferedStart;
+    
+    // 실제 보이는 영역은 항상 포함되어야 하므로, 최소한 보이는 영역만큼은 렌더링
+    // maxVisibleRows는 추가로 렌더링할 수 있는 최대 행 수
+    let newStartIndex = bufferedStart;
+    let newEndIndex = bufferedEnd;
+    
+    // 전체 버퍼 영역이 maxVisibleRows를 넘으면, 보이는 영역 중심으로 제한
+    if (bufferedRange > maxVisibleRows) {
+      // 보이는 영역이 maxVisibleRows보다 크면, 보이는 영역만 렌더링
+      if (visibleRange >= maxVisibleRows) {
+        newStartIndex = startRowIndex;
+        newEndIndex = endRowIndex;
+      } else {
+        // 보이는 영역 중심으로 위아래 버퍼 추가 (최대 maxVisibleRows개)
+        const remainingRows = maxVisibleRows - visibleRange;
+        const topBuffer = Math.floor(remainingRows / 2);
+        const bottomBuffer = remainingRows - topBuffer;
+        
+        newStartIndex = Math.max(0, startRowIndex - topBuffer);
+        newEndIndex = Math.min(filteredRows.length, endRowIndex + bottomBuffer);
+      }
+    }
+    
+    // 범위가 변경되지 않았으면 스킵
+    if (visibleStartIndex === newStartIndex && visibleEndIndex === newEndIndex && visibleRows.length > 0) {
+      return;
+    }
+    
+    visibleStartIndex = newStartIndex;
+    visibleEndIndex = newEndIndex;
+    
+    // 보이는 행 추출
+    visibleRows = filteredRows.slice(visibleStartIndex, visibleEndIndex);
+  }
+  
+  // 스크롤 이벤트 핸들러 최적화 (requestAnimationFrame 사용)
+  let scrollAnimationFrame: number | null = null;
+  
+  function handleVirtualScroll(event: Event) {
     const target = event.target as HTMLDivElement;
     scrollLeft = target.scrollLeft;
+    
+    // 헤더 스크롤은 즉시 업데이트 (사용자 경험)
     if (header) {
       header.scrollLeft = scrollLeft;
     }
-  }
-
-  let tableContainer: HTMLDivElement;
-  
-  // 원본 행 인덱스 맵 (성능 최적화) - filteredRows가 변경될 때만 업데이트
-  let originalRowIndexMap = new Map<string, number>();
-  $: {
-    // data.rows가 변경될 때만 맵 업데이트
-    originalRowIndexMap = new Map(data.rows.map((row, index) => [row.id, index]));
+    
+    // 가상 스크롤링 업데이트는 requestAnimationFrame으로 최적화
+    if (scrollAnimationFrame !== null) {
+      cancelAnimationFrame(scrollAnimationFrame);
+    }
+    
+    scrollAnimationFrame = requestAnimationFrame(() => {
+      updateVisibleRows();
+      scrollAnimationFrame = null;
+    });
   }
 
   // 외부에서 호출 가능한 네비게이션 함수
@@ -353,15 +714,28 @@
     }
   }
 
-  function updateCell(rowId: string, columnKey: string, value: any) {
+  function startCellEdit(rowId: string, columnKey: string) {
+    const row = data.rows.find((r) => r.id === rowId);
+    if (!row) return;
+    
+    const cell = row.cells[columnKey];
+    editingCell = { rowId, columnKey };
+    editingValue = formatCellValue(cell?.value);
+  }
+  
+  function commitCellEdit() {
+    if (!editingCell) return;
+    
+    const { rowId, columnKey } = editingCell;
+    const finalValue = editingValue === '' || editingValue === null || editingValue === undefined ? null : editingValue;
+    
     // 성능 최적화: 현재 값과 같으면 업데이트 스킵
     const currentRow = data.rows.find((r) => r.id === rowId);
     if (currentRow && currentRow.cells[columnKey]) {
       const currentValue = currentRow.cells[columnKey].value;
-      const finalValue = value === '' || value === null || value === undefined ? null : value;
-      
-      // 값이 변경되지 않았으면 스킵
       if (currentValue === finalValue) {
+        editingCell = null;
+        editingValue = '';
         return;
       }
     }
@@ -370,12 +744,76 @@
     dataStore.update((data) => {
       const row = data.rows.find((r) => r.id === rowId);
       if (row && row.cells[columnKey]) {
-        // 빈 문자열은 null로 저장 (결측값 처리)
-        const finalValue = value === '' || value === null || value === undefined ? null : value;
         row.cells[columnKey].value = finalValue;
       }
       return data;
     });
+    
+    editingCell = null;
+    editingValue = '';
+  }
+  
+  function cancelCellEdit() {
+    editingCell = null;
+    editingValue = '';
+  }
+  
+  function handleCellClick(rowId: string, columnKey: string, event: MouseEvent) {
+    // 이미 편집 중인 셀이 있으면 커밋
+    if (editingCell) {
+      if (editingCell.rowId !== rowId || editingCell.columnKey !== columnKey) {
+        commitCellEdit();
+      } else {
+        // 같은 셀을 다시 클릭한 경우 편집 모드 유지
+        return;
+      }
+    }
+    
+    // 새 셀 편집 시작
+    startCellEdit(rowId, columnKey);
+    event.stopPropagation();
+  }
+  
+  function handleCellKeydown(event: KeyboardEvent, rowId: string, columnKey: string) {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      commitCellEdit();
+      
+      // 다음 행으로 이동 (선택 사항)
+      const currentRowIndex = filteredRows.findIndex(r => r.id === rowId);
+      if (currentRowIndex < filteredRows.length - 1) {
+        const nextRow = filteredRows[currentRowIndex + 1];
+        setTimeout(() => {
+          startCellEdit(nextRow.id, columnKey);
+        }, 0);
+      }
+    } else if (event.key === 'Tab') {
+      event.preventDefault();
+      commitCellEdit();
+      
+      // 다음/이전 열로 이동
+      const currentColumnIndex = flatColumns.findIndex(c => c.key === columnKey);
+      if (event.shiftKey) {
+        // 이전 열
+        if (currentColumnIndex > 0) {
+          const prevColumn = flatColumns[currentColumnIndex - 1];
+          setTimeout(() => {
+            startCellEdit(rowId, prevColumn.key);
+          }, 0);
+        }
+      } else {
+        // 다음 열
+        if (currentColumnIndex < flatColumns.length - 1) {
+          const nextColumn = flatColumns[currentColumnIndex + 1];
+          setTimeout(() => {
+            startCellEdit(rowId, nextColumn.key);
+          }, 0);
+        }
+      }
+    } else if (event.key === 'Escape') {
+      event.preventDefault();
+      cancelCellEdit();
+    }
   }
 
   function formatCellValue(cell: any): string {
@@ -385,24 +823,38 @@
     return String(cell);
   }
 
+  // 이미지 URL 캐시 (성능 최적화)
+  const imageUrlCache = new Map<string, boolean>();
+  
   function isImageUrl(value: any): boolean {
     if (typeof value !== 'string') return false;
     const url = value.trim();
     if (!url) return false;
+    
+    // 캐시 확인
+    if (imageUrlCache.has(url)) {
+      return imageUrlCache.get(url)!;
+    }
     
     // 이미지 확장자 확인
     const imageExtensions = ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.bmp', '.ico'];
     const lowerUrl = url.toLowerCase();
     const hasImageExtension = imageExtensions.some(ext => lowerUrl.includes(ext));
     
-    if (!hasImageExtension) return false;
+    if (!hasImageExtension) {
+      imageUrlCache.set(url, false);
+      return false;
+    }
     
     // 유효한 URL 형식인지 확인
     try {
       const urlObj = new URL(url);
-      return urlObj.protocol === 'http:' || urlObj.protocol === 'https:';
+      const result = urlObj.protocol === 'http:' || urlObj.protocol === 'https:';
+      imageUrlCache.set(url, result);
+      return result;
     } catch {
       // 상대 경로나 다른 형식은 false 반환
+      imageUrlCache.set(url, false);
       return false;
     }
   }
@@ -1333,7 +1785,7 @@
   }
 
 
-  // Grid 컬럼 템플릿 계산
+  // Grid 컬럼 템플릿 계산 (캐싱 최적화)
   let headerGridTemplateColumns = '';
   let headerGridItems: Array<{
     element: 'row-number' | 'group-header' | 'ungrouped-header' | 'grouped-header';
@@ -1343,9 +1795,20 @@
     group?: ColumnGroup;
     width: number;
   }> = [];
+  let lastTopHeaderColumnsRef: typeof topHeaderColumns | null = null;
+  let lastColumnWidthsHash = '';
 
   $: {
-    if (columnGroups.length > 0) {
+    // topHeaderColumns나 columnWidths가 변경되었을 때만 재계산
+    const currentColumnWidthsHash = Array.from(columnWidths.entries()).sort().join(',');
+    const needsUpdate = 
+      columnGroups.length > 0 && 
+      (topHeaderColumns !== lastTopHeaderColumnsRef || currentColumnWidthsHash !== lastColumnWidthsHash);
+    
+    if (needsUpdate) {
+      lastTopHeaderColumnsRef = topHeaderColumns;
+      lastColumnWidthsHash = currentColumnWidthsHash;
+      
       // Grid 템플릿 컬럼 계산
       const columns: string[] = [`${ROW_NUMBER_WIDTH}px`];
       const items: typeof headerGridItems = [];
@@ -1410,7 +1873,7 @@
       
       headerGridTemplateColumns = columns.join(' ');
       headerGridItems = items;
-    } else {
+    } else if (columnGroups.length === 0) {
       headerGridTemplateColumns = '';
       headerGridItems = [];
     }
@@ -1638,8 +2101,13 @@
       </div>
     {/if}
   </div>
-  <div class="table-body">
-    {#each filteredRows as row (row.id)}
+  <div class="table-body" style="height: {filteredRows.length * ROW_HEIGHT}px;">
+    <!-- 가상 스크롤링: 위쪽 패딩 -->
+    {#if visibleStartIndex > 0}
+      <div class="spacer" style="height: {visibleStartIndex * ROW_HEIGHT}px;"></div>
+    {/if}
+    <!-- 실제 렌더링되는 행들 -->
+    {#each visibleRows as row (row.id)}
       {@const originalIndex = originalRowIndexMap.get(row.id) ?? -1}
       <div class="table-row">
         <div 
@@ -1656,6 +2124,7 @@
           {@const cell = row.cells[column.key]}
           {@const cellValue = cell?.value}
           {@const isImage = isImageUrl(cellValue)}
+          {@const isEditing = editingCell?.rowId === row.id && editingCell?.columnKey === column.key}
           <div 
             class="table-cell cell-wrapper" 
             style="width: {getColumnWidth(column.key)}px;"
@@ -1663,16 +2132,25 @@
             tabindex="-1"
             data-row-id={row.id}
             data-column-key={column.key}
+            on:click={(e) => handleCellClick(row.id, column.key, e)}
             on:contextmenu={(e) => handleContextMenu(e, { type: 'cell', rowId: row.id, key: column.key })}
           >
-            <input
-              type="text"
-              class="cell-input"
-              class:has-image={isImage}
-              value={formatCellValue(cellValue)}
-              on:blur={(e) => updateCell(row.id, column.key, e.currentTarget.value)}
-            />
-            {#if isImage}
+            {#if isEditing}
+              <input
+                type="text"
+                class="cell-input editing"
+                class:has-image={isImage}
+                bind:value={editingValue}
+                on:keydown={(e) => handleCellKeydown(e, row.id, column.key)}
+                on:blur={commitCellEdit}
+                autofocus
+              />
+            {:else}
+              <div class="cell-display" class:has-image={isImage}>
+                {formatCellValue(cellValue)}
+              </div>
+            {/if}
+            {#if isImage && !isEditing}
               <button
                 class="image-icon-btn"
                 on:click|stopPropagation={() => openImageViewer(String(cellValue))}
@@ -1685,6 +2163,10 @@
         {/each}
       </div>
     {/each}
+    <!-- 가상 스크롤링: 아래쪽 패딩 -->
+    {#if visibleEndIndex < filteredRows.length}
+      <div class="spacer" style="height: {(filteredRows.length - visibleEndIndex) * ROW_HEIGHT}px;"></div>
+    {/if}
   </div>
   
   {#if resizeGuideLine.visible}
@@ -1740,12 +2222,16 @@
     position: relative;
     width: fit-content;
     min-width: 100%;
+    contain: layout style paint;
   }
 
   .table-row {
     display: flex;
     min-height: 32px;
+    height: 32px;
     border-bottom: 1px solid var(--border);
+    width: 100%;
+    box-sizing: border-box;
   }
 
   .table-row.header-row {
@@ -1768,6 +2254,11 @@
 
   .table-row:hover {
     background: var(--bg-secondary);
+  }
+
+  .spacer {
+    width: 100%;
+    flex-shrink: 0;
   }
 
   .table-cell {
@@ -1947,29 +2438,47 @@
     align-items: center;
     gap: 0.25rem;
     position: relative;
+    cursor: cell;
   }
 
-  .cell-input {
+  .cell-display {
     flex: 1;
     min-width: 0;
-    background: transparent;
     color: var(--text-primary);
     font-size: 0.875rem;
     padding: 0.25rem;
-    border: none;
-    outline: none;
     text-overflow: ellipsis;
     white-space: nowrap;
     overflow: hidden;
   }
 
-  .cell-input.has-image {
+  .cell-display.has-image {
     padding-right: 1.75rem;
   }
 
-  .cell-input:focus {
+  .cell-input {
+    flex: 1;
+    min-width: 0;
     background: var(--bg-secondary);
+    color: var(--text-primary);
+    font-size: 0.875rem;
+    padding: 0.25rem;
+    border: 1px solid var(--accent);
+    outline: none;
     border-radius: 4px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    overflow: hidden;
+  }
+
+  .cell-input.editing {
+    white-space: normal;
+    overflow: visible;
+    word-wrap: break-word;
+  }
+
+  .cell-input.has-image {
+    padding-right: 1.75rem;
   }
 
   .image-icon-btn {

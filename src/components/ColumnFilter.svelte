@@ -12,7 +12,10 @@
 
   let filterValue = '';
   let uniqueValues: any[] = [];
+  let displayedValues: any[] = [];
+  let showMore = false;
   let filterBtn: HTMLButtonElement;
+  const INITIAL_DISPLAY_COUNT = 5;
 
   // 필터가 열릴 때마다 전체 데이터에서 고유 값 가져오기
   // data와 data.rows를 명시적으로 dependency로 사용하여 데이터 변경 시 업데이트
@@ -20,11 +23,27 @@
     if (isOpen && data && data.rows && data.rows.length > 0 && column && column.key) {
       // 항상 원본 데이터의 모든 행에서 고유 값 추출
       uniqueValues = getColumnValues(data, column.key);
+      showMore = false; // 필터가 다시 열릴 때 초기화
+      updateDisplayedValues();
     } else {
       // 필터가 닫히거나 데이터가 없으면 값 목록 초기화
       uniqueValues = [];
+      displayedValues = [];
+      showMore = false;
     }
   })();
+
+  function updateDisplayedValues() {
+    if (showMore) {
+      displayedValues = uniqueValues;
+    } else {
+      displayedValues = uniqueValues.slice(0, INITIAL_DISPLAY_COUNT);
+    }
+  }
+
+  $: if (showMore !== undefined) {
+    updateDisplayedValues();
+  }
 
   function toggleFilter() {
     if (onToggle) {
@@ -77,11 +96,24 @@
       />
       {#if uniqueValues.length > 0}
         <div class="value-list">
-          {#each uniqueValues as value}
+          {#each displayedValues as value}
             <button class="value-item" on:click={() => selectValue(value)}>
-              {String(value)}
+              {#if value === null}
+                <span class="special-value">null</span>
+              {:else if value === undefined}
+                <span class="special-value">undefined</span>
+              {:else if value === ''}
+                <span class="special-value">(빈 문자열)</span>
+              {:else}
+                {String(value)}
+              {/if}
             </button>
           {/each}
+          {#if uniqueValues.length > INITIAL_DISPLAY_COUNT && !showMore}
+            <button class="load-more-btn" on:click={() => { showMore = true; }}>
+              더 불러오기... ({uniqueValues.length - INITIAL_DISPLAY_COUNT}개 더)
+            </button>
+          {/if}
         </div>
       {/if}
     </div>
@@ -245,6 +277,29 @@
 
   .value-item:last-child {
     border-bottom: none;
+  }
+
+  .special-value {
+    color: var(--accent);
+    font-style: italic;
+  }
+
+  .load-more-btn {
+    width: 100%;
+    padding: 0.5rem;
+    text-align: center;
+    font-size: 0.875rem;
+    border: none;
+    border-top: 1px solid var(--border);
+    background: var(--bg-secondary);
+    cursor: pointer;
+    transition: background 0.2s;
+    color: var(--accent);
+    font-weight: 500;
+  }
+
+  .load-more-btn:hover {
+    background: var(--bg-tertiary);
   }
 </style>
 
