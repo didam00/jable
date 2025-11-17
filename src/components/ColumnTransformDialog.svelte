@@ -210,11 +210,6 @@
     lastShowState = show;
   }
 
-  // 모드 변경 시 미리보기 업데이트
-  $: if (functionCode && localSelectedColumns.size > 0) {
-    validateAndPreview();
-  }
-
   // 다이얼로그 클릭 전파 방지
   function handleDialogClick(event: MouseEvent) {
     event.stopPropagation();
@@ -225,8 +220,8 @@
     event.stopPropagation();
   }
 
-  // Tab 키 처리 함수
-  function handleTabKey(e: KeyboardEvent) {
+  // 코드 입력 키 처리 (Tab, Enter)
+  function handleCodeKeydown(e: KeyboardEvent) {
     if (e.key === 'Tab') {
       e.preventDefault();
       const textarea = e.currentTarget as HTMLTextAreaElement;
@@ -245,19 +240,24 @@
             textarea.selectionStart = textarea.selectionEnd = start - 2;
           }, 0);
         }
-      } else {
-        // Tab: 들여쓰기 추가 (2칸)
-        const newValue = value.substring(0, start) + '  ' + value.substring(end);
-        functionCode = newValue;
-        setTimeout(() => {
-          textarea.selectionStart = textarea.selectionEnd = start + 2;
-        }, 0);
+        return;
       }
+      
+      // Tab: 들여쓰기 추가 (2칸)
+      const newValue = value.substring(0, start) + '  ' + value.substring(end);
+      functionCode = newValue;
+      setTimeout(() => {
+        textarea.selectionStart = textarea.selectionEnd = start + 2;
+      }, 0);
+      return;
     }
-  }
-
-  $: if (functionCode) {
-    validateAndPreview();
+    
+    if (e.key === 'Enter' && !e.altKey && !e.metaKey && !e.ctrlKey) {
+      // 엔터 입력 후 최신 값 기준 미리보기 수행
+      setTimeout(() => {
+        validateAndPreview();
+      }, 0);
+    }
   }
 
 </script>
@@ -268,7 +268,8 @@
     role="presentation"
     on:keydown={(e) => e.key === 'Escape' && handleClose()}
   >
-    <div 
+    <!-- svelte-ignore a11y-no-noninteractive-element-interactions -->
+    <div
       class="dialog" 
       role="dialog"
       aria-modal="true"
@@ -285,6 +286,9 @@
       </div>
 
       <div class="dialog-content">
+        {#if errorMessage}
+          <div class="error-banner">{errorMessage}</div>
+        {/if}
         <div class="section">
           <div class="section-header">
             <div class="label">선택된 열 ({Array.from(localSelectedColumns).length}개)</div>
@@ -373,8 +377,29 @@
                 : '예: a * 2'
             }
             rows="4"
-            on:keydown={handleTabKey}
+            on:keydown={handleCodeKeydown}
+            on:blur={validateAndPreview}
           ></textarea>
+          <div class="section">
+            <div class="label">미리보기</div>
+            {#if previewResult}
+              {#if previewResult.success}
+                <div class="preview success">
+                  <span class="preview-label">결과:</span>
+                  <code class="preview-value">{JSON.stringify(previewResult.result)}</code>
+                </div>
+              {:else}
+                <div class="preview error">
+                  <span class="preview-label">오류:</span>
+                  <span class="preview-error">{previewResult.error}</span>
+                </div>
+              {/if}
+            {:else}
+              <div class="preview success">
+                <span class="preview-value">-</span>
+              </div>
+            {/if}
+          </div>
           <div class="hint">
             <span class="material-icons">info</span>
             <span>
@@ -427,24 +452,6 @@
             {/if}
           </div>
         {/if}
-
-        {#if previewResult}
-          <div class="section">
-            <div class="label">미리보기</div>
-            {#if previewResult.success}
-              <div class="preview success">
-                <span class="preview-label">결과:</span>
-                <code class="preview-value">{JSON.stringify(previewResult.result)}</code>
-              </div>
-            {:else}
-              <div class="preview error">
-                <span class="preview-label">오류:</span>
-                <span class="preview-error">{previewResult.error}</span>
-              </div>
-            {/if}
-          </div>
-        {/if}
-
       </div>
 
       <div class="dialog-footer">
@@ -770,6 +777,15 @@
   .preview.error {
     background: rgba(255, 59, 48, 0.1);
     color: var(--error);
+  }
+
+  .error-banner {
+    background: rgba(255, 59, 48, 0.15);
+    color: var(--error);
+    border-radius: 6px;
+    padding: 0.5rem 0.75rem;
+    margin-bottom: 0.75rem;
+    font-size: 0.875rem;
   }
 
   .preview-label {

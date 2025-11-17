@@ -9,6 +9,10 @@ export interface AppSettings {
   maxVisibleRows: number; // 최대로 위아래 불러와지는 행의 개수
   bufferRows: number; // 버퍼 행 수
   historyDelay: number; // 히스토리 추가 지연 시간 (ms)
+  renderRowLimit: number; // 렌더링할 최대 행 수 (-1은 제한 없음)
+  maxChildArray: number; // 배열형 하위 열의 최대 세로 표시 개수 (-1은 제한 없음)
+  maxHeaderRows: number; // 헤더에서 표시할 최대 층수 (-1은 제한 없음)
+  rowHeight: number; // 슬롯(행) 높이
 }
 
 const DEFAULT_SETTINGS: AppSettings = {
@@ -16,6 +20,10 @@ const DEFAULT_SETTINGS: AppSettings = {
   maxVisibleRows: 50,
   bufferRows: 25,
   historyDelay: 500,
+  renderRowLimit: -1,
+  maxChildArray: -1,
+  maxHeaderRows: -1,
+  rowHeight: 32,
 };
 
 const SETTINGS_STORAGE_KEY = 'json-editor-settings';

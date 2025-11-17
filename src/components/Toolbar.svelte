@@ -170,7 +170,7 @@
   </div>
   <SearchBar on:searchChange={(e) => dispatch('searchChange', e.detail)} />
   <div class="toolbar-right" class:open={isMenuOpen}>
-    export as
+    <span style="white-space: nowrap;" >export as</span>
     <button class="btn" on:click={() => handleExport('toon')}>TOON</button><span class="split">|</span>
     <button class="btn" on:click={() => handleExport('json')}>JSON</button><span class="split">|</span>
     <button class="btn" on:click={() => handleExport('csv')}>CSV</button><span class="split">|</span>
@@ -200,7 +200,6 @@
   }
 
   .toolbar-right {
-    margin-right: 1rem;
     font-size: 0.875rem;
     font-weight: 500;
     color: var(--text-secondary);

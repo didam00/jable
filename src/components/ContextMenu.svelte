@@ -10,8 +10,21 @@
   }> = [];
 </script>
 
-<div class="context-menu" style="left: {x}px; top: {y}px;" on:click|stopPropagation>
-  {#each items as item, index}
+<div
+  class="context-menu"
+  role="menu"
+  aria-label="컨텍스트 메뉴"
+  tabindex="-1"
+  style="left: {x}px; top: {y}px;"
+  on:click|stopPropagation
+  on:keydown={(event) => {
+    if (event.key === 'Escape') {
+      event.stopPropagation();
+      onClose();
+    }
+  }}
+>
+  {#each items as item}
     {#if item.divider}
       <div class="divider"></div>
     {:else}

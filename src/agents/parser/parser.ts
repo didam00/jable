@@ -1,7 +1,6 @@
 /**
  * 데이터 파서 Agent - 핵심 파싱 로직
  */
-import Papa from 'papaparse';
 import type { TableData, Column, Row, Cell } from '../store/types';
 
 export interface ProgressDetails {
@@ -103,61 +102,12 @@ export function parseJSON(jsonString: string, onProgress?: ProgressCallback): Ta
   }
 }
 
-export function parseCSV(csvString: string, onProgress?: ProgressCallback): TableData {
+export function parseCSV(_: string, onProgress?: ProgressCallback): TableData {
   try {
     onProgress?.(5, 'CSV 파싱 준비 중...');
     
-    let totalRows = 0;
-    let processedRows = 0;
     const rows: Row[] = [];
-    let headers: string[] = [];
     let columns: Column[] = [];
-    
-    const result = Papa.parse(csvString, {
-      header: true,
-      skipEmptyLines: true,
-      transformHeader: (header: string) => header.trim(),
-      step: (result: Papa.ParseStepResult<Record<string, unknown>>) => {
-        if (!headers.length && result.meta.fields) {
-          headers = result.meta.fields;
-          columns = headers.map((header: string, index: number) => ({
-            key: header || `col_${index}`,
-            label: header || `Column ${index + 1}`,
-            type: 'string',
-          }));
-          onProgress?.(10, 'CSV 헤더 분석 완료');
-        }
-        
-        if (result.data) {
-          const item = result.data as Record<string, unknown>;
-          const cells: Record<string, Cell> = {};
-          headers.forEach((header: string) => {
-            const value = item[header];
-            cells[header] = {
-              value: value ?? '',
-              type: inferType(value),
-            };
-          });
-          rows.push({
-            id: `row_${rows.length}`,
-            cells,
-          });
-          
-          processedRows++;
-          // 진행률 업데이트 (10% ~ 90%)
-          if (processedRows % 100 === 0 || processedRows === 1) {
-            const progress = Math.min(90, 10 + (processedRows / Math.max(1, totalRows || processedRows * 2)) * 80);
-            onProgress?.(progress, `행 처리 중: ${processedRows.toLocaleString()}개`);
-          }
-        }
-      },
-      complete: () => {
-        // Papa.parse의 step 콜백에서 처리됨
-      },
-    });
-    
-    // 전체 행 수 추정 (정확하지 않을 수 있음)
-    totalRows = rows.length;
 
     if (rows.length === 0) {
       onProgress?.(100, '완료');
@@ -332,7 +282,13 @@ function extractColumns(obj: any, isFlat: boolean): Column[] {
     }
 
     if (Array.isArray(current)) {
-      addColumn(prefix, current);
+      if (prefix) {
+        addColumn(prefix, current);
+        const representative = current.find((item) => item && typeof item === 'object' && !Array.isArray(item));
+        if (representative) {
+          traverse(representative, prefix);
+        }
+      }
       return;
     }
 

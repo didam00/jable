@@ -1,7 +1,8 @@
 <script lang="ts">
   import { createEventDispatcher, onMount } from 'svelte';
   import { searchData } from '../agents/search';
-  import { parseQuery } from '../agents/search/queryParser';
+  import { parseQuery, type ColumnSelection, type ParsedQuery } from '../agents/search/queryParser';
+  import { resolveColumnSelectionToKeys } from '../agents/search/selectionUtils';
   import { dataStore } from '../agents/store';
   import type { TableData } from '../agents/store';
   import type { SearchResult } from '../agents/search/types';
@@ -50,7 +51,7 @@
       results = [];
       dispatch('searchChange', { 
         matchedRowIds: new Set<string>(),
-        filteredColumnKey: null,
+        filteredColumnKeys: null,
       });
       return;
     }
@@ -61,58 +62,7 @@
     // 검색된 행 ID들을 Set으로 만들어서 전달
     const matchedRowIds = new Set<string>(results.map(r => r.rowId));
     
-    // 열 필터링 정보 추출
-    let filteredColumnKeys: string[] | null = null;
-    if (parsed.type === 'columnFilter') {
-      const keys: string[] = [];
-      
-      // 단일 열
-      if (parsed.filterColumn !== undefined) {
-        if (typeof parsed.filterColumn === 'number') {
-          const column = data.columns[parsed.filterColumn];
-          if (column) {
-            keys.push(column.key);
-          }
-        } else {
-          const column = data.columns.find(col => col.key === parsed.filterColumn || col.label === parsed.filterColumn);
-          if (column) {
-            keys.push(column.key);
-          }
-        }
-      }
-      
-      // 열 범위 (::2-4)
-      if (parsed.filterColumnStart !== undefined && parsed.filterColumnEnd !== undefined) {
-        const start = Math.max(0, Math.min(parsed.filterColumnStart, parsed.filterColumnEnd));
-        const end = Math.min(data.columns.length - 1, Math.max(parsed.filterColumnStart, parsed.filterColumnEnd));
-        for (let i = start; i <= end; i++) {
-          if (data.columns[i]) {
-            keys.push(data.columns[i].key);
-          }
-        }
-      }
-      
-      // 열 리스트 (::1,2,3)
-      if (parsed.filterColumns) {
-        parsed.filterColumns.forEach(colSpec => {
-          if (typeof colSpec === 'number') {
-            const column = data.columns[colSpec];
-            if (column) {
-              keys.push(column.key);
-            }
-          } else {
-            const column = data.columns.find(col => col.key === colSpec || col.label === colSpec);
-            if (column) {
-              keys.push(column.key);
-            }
-          }
-        });
-      }
-      
-      if (keys.length > 0) {
-        filteredColumnKeys = keys;
-      }
-    }
+    const filteredColumnKeys = resolveFilteredColumns(parsed);
     
     dispatch('searchChange', { 
       matchedRowIds,
@@ -131,6 +81,83 @@
     } else if (event.key === 'Enter' && event.ctrlKey) {
       performSearch();
     }
+  }
+
+  function resolveFilteredColumns(parsed: ParsedQuery): string[] | null {
+    if (!data || data.columns.length === 0) {
+      return null;
+    }
+    
+    if (parsed.type === 'columnFilter') {
+      const keys: string[] = [];
+      
+      if (parsed.filterColumn !== undefined) {
+        const column = getColumnBySpec(parsed.filterColumn);
+        if (column) {
+          keys.push(column.key);
+        }
+      }
+      
+      if (parsed.filterColumnStart !== undefined && parsed.filterColumnEnd !== undefined) {
+        const start = Math.max(0, Math.min(parsed.filterColumnStart, parsed.filterColumnEnd));
+        const end = Math.min(data.columns.length - 1, Math.max(parsed.filterColumnStart, parsed.filterColumnEnd));
+        for (let i = start; i <= end; i++) {
+          if (data.columns[i]) {
+            keys.push(data.columns[i].key);
+          }
+        }
+      }
+      
+      if (parsed.filterColumns) {
+        parsed.filterColumns.forEach(colSpec => {
+          const column = getColumnBySpec(colSpec);
+          if (column) {
+            keys.push(column.key);
+          }
+        });
+      }
+      
+      return keys.length > 0 ? Array.from(new Set(keys)) : null;
+    }
+    
+    const columnSelection = getColumnSelectionFromQuery(parsed);
+    if (!columnSelection) {
+      return null;
+    }
+    const keys = resolveColumnSelectionToKeys(data.columns, columnSelection);
+    return keys.length > 0 ? keys : null;
+  }
+  
+  function getColumnSelectionFromQuery(parsed: ParsedQuery): ColumnSelection | null {
+    switch (parsed.type) {
+      case 'cell':
+        if (parsed.cellColumn === undefined) return null;
+        return { kind: 'single', value: parsed.cellColumn };
+      case 'cellRange':
+        if (parsed.cellStartColumn === undefined || parsed.cellEndColumn === undefined) return null;
+        return {
+          kind: 'range',
+          start: parsed.cellStartColumn,
+          end: parsed.cellEndColumn,
+        };
+      case 'cellList':
+        if (!parsed.cellColumns || parsed.cellColumns.length === 0) return null;
+        return {
+          kind: 'list',
+          values: parsed.cellColumns,
+        };
+      case 'rowColumn':
+        return parsed.columnSelection ?? null;
+      default:
+        return null;
+    }
+  }
+  
+  function getColumnBySpec(spec: string | number) {
+    if (typeof spec === 'number') {
+      return data.columns[spec];
+    }
+    return data.columns.find(col => col.key === spec || col.label === spec);
   }
 </script>
 
@@ -233,5 +260,7 @@
     font-size: 0.875rem;
     color: var(--text-secondary);
   }
+
 </style>
+
 

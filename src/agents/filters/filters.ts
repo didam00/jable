@@ -60,7 +60,6 @@ export function sortRows(rows: Row[], columnKey: string, direction: 'asc' | 'des
 }
 
 export function getColumnValues(data: TableData, columnKey: string): any[] {
-  const values = new Set<any>();
   const specialValues: any[] = []; // null, undefined, 빈 문자열 등 특이값
   const normalValues: any[] = []; // 일반 값들
   

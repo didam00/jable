@@ -10,6 +10,10 @@
     maxVisibleRows: 50,
     bufferRows: 25,
     historyDelay: 500,
+    renderRowLimit: -1,
+    maxChildArray: -1,
+    maxHeaderRows: -1,
+    rowHeight: 32,
   };
 
   $: settingsStore.subscribe((value) => {
@@ -32,11 +36,18 @@
     })();
     onClose();
   }
+
+  function handleDialogKeydown(event: KeyboardEvent) {
+    if (event.key === 'Escape') {
+      event.stopPropagation();
+      handleCancel();
+    }
+  }
 </script>
 
 {#if isOpen}
-  <div class="settings-overlay" on:click={handleCancel} on:keydown={(e) => e.key === 'Escape' && handleCancel()}>
-    <div class="settings-dialog" on:click|stopPropagation>
+  <div class="settings-overlay">
+    <div class="settings-dialog" role="dialog" aria-labelledby="settings-dialog-title" aria-modal="true" tabindex="-1" on:click|stopPropagation on:keydown={handleDialogKeydown}>
       <div class="settings-header">
         <h2>설정</h2>
         <button class="close-btn" on:click={handleCancel} title="닫기">
@@ -74,6 +85,59 @@
 
         <div class="settings-group">
           <label class="settings-label">
+            <span>렌더링 행 제한</span>
+            <input
+              type="number"
+              min="-1"
+              bind:value={settings.renderRowLimit}
+              class="settings-input"
+            />
+          </label>
+          <p class="settings-description">표에 실제로 렌더링할 최대 행 수입니다. -1이면 제한이 없습니다.</p>
+        </div>
+
+        <div class="settings-group">
+          <label class="settings-label">
+            <span>하위 배열 세로 표시 제한</span>
+            <input
+              type="number"
+              min="-1"
+              bind:value={settings.maxChildArray}
+              class="settings-input"
+            />
+          </label>
+          <p class="settings-description">배열 기반 하위 열을 세로로 얼마나 펼칠지 설정합니다. -1이면 모든 항목을 표시합니다.</p>
+        </div>
+
+        <div class="settings-group">
+          <label class="settings-label">
+            <span>헤더 최대 층수</span>
+            <input
+              type="number"
+              min="-1"
+              bind:value={settings.maxHeaderRows}
+              class="settings-input"
+            />
+          </label>
+          <p class="settings-description">제목 행에서 표시할 최대 층수입니다. -1이면 제한 없이 모두 표시하며, 양수로 설정하면 해당 높이만큼만 보여주고 스크롤할 수 있습니다.</p>
+        </div>
+
+        <div class="settings-group">
+          <label class="settings-label">
+            <span>행 높이(px)</span>
+            <input
+              type="number"
+              min="16"
+              max="120"
+              bind:value={settings.rowHeight}
+              class="settings-input"
+            />
+          </label>
+          <p class="settings-description">가상 스크롤 슬롯의 높이를 지정합니다. 값이 작을수록 더 많은 데이터를 한 화면에서 볼 수 있습니다.</p>
+        </div>
+
+        <div class="settings-group">
+          <label class="settings-label">
             <span>버퍼 행 개수</span>
             <input
               type="number"
@@ -84,21 +148,6 @@
             />
           </label>
           <p class="settings-description">스크롤 시 위/아래에 미리 로드할 행 개수입니다.</p>
-        </div>
-
-        <div class="settings-group">
-          <label class="settings-label">
-            <span>히스토리 추가 지연 시간 (ms)</span>
-            <input
-              type="number"
-              min="0"
-              max="2000"
-              step="100"
-              bind:value={settings.historyDelay}
-              class="settings-input"
-            />
-          </label>
-          <p class="settings-description">연속된 변경을 묶어서 히스토리에 추가하기 위한 지연 시간입니다.</p>
         </div>
       </div>
       <div class="settings-footer">

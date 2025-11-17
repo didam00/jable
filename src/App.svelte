@@ -11,6 +11,7 @@
   import Tabs from './components/Tabs.svelte';
   import ProgressBar from './components/ProgressBar.svelte';
   import SettingsDialog from './components/SettingsDialog.svelte';
+  import TitleBar from './components/TitleBar.svelte';
   import { compressToToon, decompressFromToon } from './agents/compression/toon';
   import type { TableData } from './agents/store';
   import type { Tab } from './types/tab';
@@ -44,6 +45,7 @@
   let searchMatchedRowIds: Set<string> = new Set();
   let searchFilteredColumnKeys: string[] | null = null;
   let showSettings = false;
+  const isTauriApp = isTauri();
 
   onMount(() => {
     dataStore.subscribe((value) => {
@@ -557,6 +559,9 @@
   on:dragleave={handleDragLeave}
   on:drop={handleDrop}
 >
+  {#if isTauriApp}
+    <TitleBar />
+  {/if}
   <Toolbar 
     on:newTab={(e) => {
       handleFileDrop(e.detail);
@@ -703,34 +708,10 @@
     height: 100px;
     margin-top: -64px;
   }
-
-  .empty-state h2 {
-    font-size: 2rem;
-    font-weight: 600;
-    margin-bottom: 0.5rem;
-    color: var(--text-primary);
-  }
-
+  
   .empty-state p {
     font-size: 0.875rem;
     margin-top: -0.25rem;
-  }
-
-  .shortcuts {
-    margin-top: 2rem;
-    text-align: left;
-  }
-
-  .shortcuts ul {
-    list-style: none;
-    padding: 0;
-    margin-top: 0.5rem;
-  }
-
-  .shortcuts li {
-    padding: 0.25rem 0;
-    font-size: 0.875rem;
-    color: var(--text-secondary);
   }
 
   .stats-controls-container {

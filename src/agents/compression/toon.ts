@@ -1,11 +1,12 @@
 /**
  * .toon 포맷 - TableData를 TOON 명세에 맞춘 텍스트 표현으로 직렬화/역직렬화
- * https://github.com/toon-format/toon 의 공개 명세를 참고하여
- * 버전 헤더(TOON/<version>)와 사람이 읽기 좋은 JSON Payload를 조합한다.
+ * https://github.com/toon-format/toon 의 공개 명세를 따르며
+ * 실제 데이터 구조를 사람이 읽기 쉬운 TOON 텍스트로 변환한다.
  */
+import { encode, decode } from '@toon-format/toon';
 import type { Column, Row, TableData } from '../store/types';
-
-const TOON_VERSION = '1.0';
+import { exportToJSON, parseJSON } from '../parser';
+import { compressToEncodedURIComponent, decompressFromEncodedURIComponent } from './lzString';
 
 export type ProgressCallback = (
   progress: number,
@@ -25,22 +26,48 @@ interface ToonPayload {
   rows: Row[];
 }
 
+const DEFAULT_SHARE_BASE_URL = 'https://json-editor.app/share?toon=';
+
+export interface ToonShareOptions {
+  baseUrl?: string;
+  onProgress?: ProgressCallback;
+}
+
+export interface ToonShareResult {
+  toon: string;
+  encoded: string;
+  url: string;
+  plainLength: number;
+  compressedLength: number;
+}
+
 /**
  * TableData를 사람이 읽기 좋은 TOON 포맷 문자열로 직렬화한다.
  */
 export function compressToToon(data: TableData, onProgress?: ProgressCallback): string {
-  const normalized = normalizeTableData(data);
-  const payload = buildPayload(normalized);
-
-  onProgress?.(20, 'TOON 헤더 준비 중...', {
+  onProgress?.(20, '데이터 구조화 중...', {
     stage: 'compressing',
     current: 0,
-    total: normalized.rows.length,
+    total: data.rows.length,
     stageProgress: 20,
   });
 
-  const prettyJson = JSON.stringify(payload, null, 2);
-  const result = `TOON/${TOON_VERSION}\n${prettyJson}`;
+  const structured = tableDataToStructuredValue(data);
+
+  onProgress?.(60, 'TOON 인코딩 중...', {
+    stage: 'compressing',
+    current: 0,
+    total: Array.isArray(structured) ? structured.length : 1,
+    stageProgress: 60,
+  });
+
+  let result: string;
+  try {
+    result = encode(structured, { indent: 2 }).trimEnd();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    throw new Error(`TOON 인코딩 실패: ${message}`);
+  }
 
   onProgress?.(100, `완료 (${result.length.toLocaleString()} chars)`, {
     stage: 'complete',
@@ -50,6 +77,21 @@ export function compressToToon(data: TableData, onProgress?: ProgressCallback): 
   });
 
   return result;
+}
+
+export function createToonShareLink(data: TableData, options?: ToonShareOptions): ToonShareResult {
+  const toon = compressToToon(data, options?.onProgress);
+  const encoded = compressToEncodedURIComponent(toon);
+  const baseUrl =
+    options?.baseUrl && options.baseUrl.trim().length > 0 ? options.baseUrl.trim() : DEFAULT_SHARE_BASE_URL;
+
+  return {
+    toon,
+    encoded,
+    url: `${baseUrl}${encoded}`,
+    plainLength: toon.length,
+    compressedLength: encoded.length,
+  };
 }
 
 /**
@@ -64,11 +106,23 @@ export function decompressFromToon(toonString: string, onProgress?: ProgressCall
   }
 
   const trimmed = toonString.trim();
+  const withoutHeader = stripToonHeader(trimmed);
+
+  const decodedValue = tryDecodeToStructuredValue(withoutHeader);
+  if (decodedValue !== null) {
+    const tableData = structuredValueToTableData(decodedValue);
+    onProgress?.(100, 'TOON 파싱 완료', {
+      stage: 'complete',
+      current: tableData.rows.length,
+      total: tableData.rows.length,
+      stageProgress: 100,
+    });
+    return tableData;
+  }
 
   // 1) 신규 TOON 포맷 (헤더 + JSON)
   if (trimmed.startsWith('TOON/')) {
-    const [, ...rest] = trimmed.split(/\r?\n/);
-    const payloadText = rest.join('\n');
+    const payloadText = withoutHeader;
     const payload = safeParseJson(payloadText);
     const tableData = normalizeTableData(parsePayload(payload));
 
@@ -103,16 +157,17 @@ export function decompressFromToon(toonString: string, onProgress?: ProgressCall
   throw new Error('Invalid .toon format: unsupported content');
 }
 
-function buildPayload(data: TableData): ToonPayload {
-  return {
-    version: TOON_VERSION,
-    metadata: data.metadata,
-    columns: data.columns.map((column) => ({ ...column })),
-    rows: data.rows.map((row) => ({
-      id: row.id,
-      cells: { ...row.cells },
-    })),
-  };
+export function parseToonSharePayload(payload: string, onProgress?: ProgressCallback): TableData {
+  if (!payload) {
+    throw new Error('공유 문자열이 비어 있습니다.');
+  }
+
+  const toon = decompressFromEncodedURIComponent(payload);
+  if (!toon) {
+    throw new Error('공유 문자열을 해석할 수 없습니다.');
+  }
+
+  return decompressFromToon(toon, onProgress);
 }
 
 function parsePayload(payload: unknown): ToonPayload {
@@ -137,7 +192,7 @@ function parsePayload(payload: unknown): ToonPayload {
   };
 
   return {
-    version: typeof candidate.version === 'string' ? candidate.version : TOON_VERSION,
+    version: candidate.version!,
     metadata: {
       rowCount: candidate.rows.length,
       columnCount: candidate.columns.length,
@@ -247,4 +302,53 @@ function decodeBase64(input: string): string {
  */
 export function getCompressionRatio(originalSize: number, compressedSize: number): number {
   return ((originalSize - compressedSize) / originalSize) * 100;
+}
+
+function tableDataToStructuredValue(data: TableData): unknown {
+  const jsonString = exportToJSON(data);
+  const parsed = safeParseJson(jsonString);
+
+  if (!Array.isArray(parsed)) {
+    return parsed;
+  }
+
+  if (parsed.length === 0) {
+    return [];
+  }
+
+  if (parsed.length === 1) {
+    return parsed[0];
+  }
+
+  return parsed;
+}
+
+function structuredValueToTableData(value: unknown): TableData {
+  if (Array.isArray(value) || (value && typeof value === 'object')) {
+    const jsonString = JSON.stringify(value, null, 2);
+    return parseJSON(jsonString);
+  }
+
+  throw new Error('Invalid .toon format: root value must be object or array');
+}
+
+function stripToonHeader(content: string): string {
+  if (!content.startsWith('TOON/')) {
+    return content;
+  }
+
+  const [, ...rest] = content.split(/\r?\n/);
+  return rest.join('\n').trimStart();
+}
+
+function tryDecodeToStructuredValue(content: string): unknown | null {
+  if (!content) {
+    return null;
+  }
+
+  try {
+    return decode(content, { strict: true });
+  } catch {
+    return null;
+  }
 }

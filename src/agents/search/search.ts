@@ -3,7 +3,8 @@
  */
 import type { TableData } from '../store/types';
 import type { SearchResult } from './types';
-import { parseQuery, type ParsedQuery } from './queryParser';
+import { parseQuery, type ColumnSelection, type RowSelection, type NumericComparison, type StringComparison } from './queryParser';
+import { resolveColumnSelectionToKeys, resolveRowSelectionToIndices } from './selectionUtils';
 
 export function searchData(data: TableData, query: string, useRegex: boolean = false): SearchResult[] {
   if (!query.trim()) return [];
@@ -17,6 +18,8 @@ export function searchData(data: TableData, query: string, useRegex: boolean = f
     case 'column':
       // column=str은 정확히 같은 경우만 검색 (포함이 아님)
       return columnExactSearch(data, parsed.columnName || '', parsed.text || '');
+    case 'columnPresence':
+      return columnPresenceSearch(data, parsed.columnName || '', parsed.presenceCheck || 'missing');
     case 'comparison':
       return comparisonSearch(data, parsed.comparisons || [], parsed.stringComparisons || [], parsed.logicalOperator || '&');
     case 'stringComparison':
@@ -35,6 +38,11 @@ export function searchData(data: TableData, query: string, useRegex: boolean = f
       return cellListSearch(data, parsed.cellRow ?? -1, parsed.cellColumns || []);
     case 'columnFilter':
       return columnFilterSearch(data, parsed.filterColumn);
+    case 'rowColumn':
+      if (parsed.rowSelection && parsed.columnSelection) {
+        return rowColumnSearch(data, parsed.rowSelection, parsed.columnSelection);
+      }
+      return [];
     default:
       return normalSearch(data, query, useRegex);
   }
@@ -114,7 +122,30 @@ function columnExactSearch(data: TableData, columnName: string, text: string): S
   return results;
 }
 
-function comparisonSearch(data: TableData, numericComparisons: Array<{ column: string; operator: '>' | '>=' | '<' | '<=' | '=' | '!='; value: number; isNumeric: true }>, stringComparisons: Array<{ column: string; operator: '>' | '>=' | '<' | '<=' | '!=' | '='; value: string; isNumeric: false }>, logicalOp: '&' | '|'): SearchResult[] {
+function columnPresenceSearch(data: TableData, columnName: string, check: 'missing' | 'exists'): SearchResult[] {
+  const results: SearchResult[] = [];
+  const column = data.columns.find(col => col.key === columnName || col.label === columnName);
+
+  if (!column) return [];
+
+  data.rows.forEach((row) => {
+    const cell = row.cells[column.key];
+    const hasValue = cell !== undefined && cell.value !== null && cell.value !== undefined;
+    const matchesCheck = check === 'missing' ? !hasValue : hasValue;
+
+    if (matchesCheck) {
+      results.push({
+        rowId: row.id,
+        columnKey: column.key,
+        matches: 1,
+      });
+    }
+  });
+
+  return results;
+}
+
+function comparisonSearch(data: TableData, numericComparisons: NumericComparison[], stringComparisons: StringComparison[], logicalOp: '&' | '|'): SearchResult[] {
   const results: SearchResult[] = [];
   const allComparisons = [...numericComparisons, ...stringComparisons];
 
@@ -205,6 +236,9 @@ function comparisonSearch(data: TableData, numericComparisons: Array<{ column: s
         case '!=':
           matches = cellValue !== searchValue;
           break;
+        case '!>':
+          matches = !cellValue.includes(searchValue);
+          break;
       }
       matchResults.push(matches);
     }
@@ -235,8 +269,42 @@ function comparisonSearch(data: TableData, numericComparisons: Array<{ column: s
   return results;
 }
 
-function stringComparisonSearch(data: TableData, stringComparisons: Array<{ column: string; operator: '>' | '>=' | '<' | '<=' | '!=' | '='; value: string; isNumeric: false }>, logicalOp: '&' | '|'): SearchResult[] {
+function stringComparisonSearch(data: TableData, stringComparisons: StringComparison[], logicalOp: '&' | '|'): SearchResult[] {
   return comparisonSearch(data, [], stringComparisons, logicalOp);
+}
+
+function rowColumnSearch(data: TableData, rowSelection: RowSelection, columnSelection: ColumnSelection): SearchResult[] {
+  const rowIndices = resolveRowSelectionToIndices(rowSelection, data.rows.length);
+  const columnKeys = resolveColumnSelectionToKeys(data.columns, columnSelection);
+  if (rowIndices.length === 0 || columnKeys.length === 0) {
+    return [];
+  }
+  
+  const results: SearchResult[] = [];
+  rowIndices.forEach(rowIndex => {
+    const row = data.rows[rowIndex];
+    if (!row) {
+      return;
+    }
+    columnKeys.forEach(columnKey => {
+      if (row.cells[columnKey]) {
+        results.push({
+          rowId: row.id,
+          columnKey,
+          matches: 1,
+        });
+      } else {
+        // 열이 존재하지 않아도 행 필터링을 위해 placeholder 추가
+        results.push({
+          rowId: row.id,
+          columnKey,
+          matches: 0,
+        });
+      }
+    });
+  });
+  
+  return results;
 }
 
 function rowSearch(data: TableData, rowIndex: number): SearchResult[] {

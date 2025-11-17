@@ -14,7 +14,6 @@
   let uniqueValues: any[] = [];
   let displayedValues: any[] = [];
   let showMore = false;
-  let filterBtn: HTMLButtonElement;
   const INITIAL_DISPLAY_COUNT = 5;
 
   // 필터가 열릴 때마다 전체 데이터에서 고유 값 가져오기
@@ -70,7 +69,7 @@
 
 <div class="column-filter">
   <div class="filter-actions">
-    <button class="filter-btn" bind:this={filterBtn} on:click={toggleFilter} title="필터">
+    <button class="filter-btn" on:click={toggleFilter} title="필터">
       <span class="material-icons">filter_list</span>
     </button>
     {#if onTransform}

@@ -10,84 +10,508 @@
   import { executeFunctionSync, DELETE_MARKER } from '../utils/safeFunctionExecutor';
   import { onMount, createEventDispatcher } from 'svelte';
   import { settingsStore } from '../agents/settings/settings';
+  import type { AppSettings } from '../agents/settings/settings';
   
-  const dispatch = createEventDispatcher();
+const dispatch = createEventDispatcher();
 
-  let data: TableData = {
-    columns: [],
-    rows: [],
-    metadata: { rowCount: 0, columnCount: 0, isFlat: true },
+const DEFAULT_COLUMN_WIDTH = 200;
+const ROW_NUMBER_WIDTH = 60;
+const HEADER_ROW_HEIGHT = 28;
+const PRIMITIVE_ARRAY_FIELD_KEY = '__value__';
+
+export let searchMatchedRowIds: Set<string> = new Set();
+export let searchFilteredColumnKeys: string[] | null = null;
+
+let data: TableData = {
+  columns: [],
+  rows: [],
+  metadata: { rowCount: 0, columnCount: 0, isFlat: true },
+};
+
+let scrollLeft = 0;
+let header: HTMLDivElement;
+let sortColumn: string | null = null;
+let sortDirection: 'asc' | 'desc' = 'asc';
+let filteredRows: Row[] = [];
+let renderRowCount = 0;
+let columnWidths: Map<string, number> = new Map();
+let activeFilters: Map<string, string> = new Map();
+let resizingColumn: string | null = null;
+let resizeStartX = 0;
+let resizeStartWidth = 0;
+let resizePreviewWidth = 0;
+let resizeGuideLine: { x: number; visible: boolean } = { x: 0, visible: false };
+let selectedColumns: Set<string> = new Set();
+let showTransformDialog = false;
+let openFilterColumn: string | null = null;
+let contextMenu: { x: number; y: number; items: any[] } | null = null;
+let showImageViewer = false;
+let imageViewerUrl = '';
+let isSelectingColumns = false;
+let selectionStartColumn: string | null = null;
+let lastClickedColumn: string | null = null;
+let draggingColumn: string | null = null;
+let dragOverColumn: string | null = null;
+let dragStartX = 0;
+let dragCurrentX = 0;
+let dragColumnElement: HTMLElement | null = null;
+let dragGhost: HTMLElement | null = null;
+let dragColumnElementsCache: HTMLElement[] | null = null;
+let dragAnimationFrame: number | null = null;
+let draggingColumnParentKey = '';
+let editingCell: { rowId: string; columnKey: string } | null = null;
+let editingValue: string = '';
+let maxVisibleRows = 50;
+let bufferRows = 25;
+let renderRowLimit = -1;
+let maxChildArray = -1;
+let maxHeaderRows = -1;
+let rowHeight = 32;
+let expandedChildArrays: Set<string> = new Set();
+let arrayAwareColumns: Column[] = [];
+let displayColumnMeta: Map<string, DisplayColumnMeta> = new Map();
+let displayColumns: Column[] = [];
+let tableBodyHeight = 0;
+let rowHeights: number[] = [];
+let rowOffsets: number[] = [];
+let totalTableHeight = 0;
+let rowDisplaySlotCount: Map<string, number> = new Map();
+let arrayDisplayCache: Map<string, Map<string, ArrayDisplayMetrics>> = new Map();
+let tableContainer: HTMLDivElement;
+let resizeObserver: ResizeObserver | null = null;
+let visibleStartIndex = 0;
+let visibleEndIndex = 0;
+let visibleRows: Row[] = [];
+let topSpacerHeight = 0;
+let bottomSpacerHeight = 0;
+let originalRowIndexMap = new Map<string, number>();
+let lastDataRowsLength = 0;
+let lastDataRowsRef: Row[] | null = null;
+let lastScrollTop = -1;
+let lastContainerHeight = -1;
+let lastRenderRowCount = -1;
+let scrollAnimationFrame: number | null = null;
+let lastFilterState = '';
+let filterUpdateTimeout: ReturnType<typeof setTimeout> | null = null;
+let lastDataRef: TableData | null = null;
+let lastDataHash = '';
+let lastSearchMatchedRef: Set<string> | null = null;
+let lastSearchMatchedSize = 0;
+let filterUpdateFrame: number | null = null;
+let lastFilteredRowsRef: Row[] | null = null;
+let flatColumns: Column[] = [];
+let columnHeaderTree: ColumnHeaderTreeNode[] = [];
+let headerGridItems: HeaderGridItem[] = [];
+let headerGridTemplateColumns = '';
+let headerGridRowStyle = '';
+let headerDepth = 1;
+let hasNestedHeaders = false;
+let columnParentMap: Map<string, string> = new Map();
+let headerScrollStyle = '';
+const imageUrlCache = new Map<string, boolean>();
+  
+function applySettings(settings: AppSettings) {
+  maxVisibleRows = settings.maxVisibleRows;
+  bufferRows = settings.bufferRows;
+  renderRowLimit = settings.renderRowLimit;
+  maxChildArray = settings.maxChildArray;
+  maxHeaderRows = settings.maxHeaderRows;
+  rowHeight = Math.max(16, settings.rowHeight || 32);
+  recomputeDisplayStructures();
+}
+  
+applySettings(settingsStore.get());
+
+interface ColumnHeaderTreeNode {
+  path: string;
+  label: string;
+  depth: number;
+  parentPath: string;
+  column?: Column;
+  children: ColumnHeaderTreeNode[];
+  leafCount?: number;
+  startIndex?: number;
+}
+
+interface HeaderGridItem {
+  path: string;
+  label: string;
+  gridColumn: string;
+  gridRow: string;
+  column?: Column;
+  isLeaf: boolean;
+}
+
+interface ArrayDisplayMetrics {
+  items: any[];
+  showMore: boolean;
+  displayCount: number;
+  totalCount: number;
+}
+
+interface DisplayColumnMeta {
+  kind: 'scalar' | 'array-child';
+  baseColumnKey: string;
+  parentKey?: string;
+  fieldPath?: string[];
+}
+
+function getColumnParentKey(columnKey: string): string {
+  const parts = columnKey.split('.');
+  parts.pop();
+  return parts.join('.');
+}
+
+function buildColumnHeaderTree(columns: Column[]): ColumnHeaderTreeNode[] {
+  const rootChildren: ColumnHeaderTreeNode[] = [];
+  const pathMap = new Map<string, ColumnHeaderTreeNode>();
+
+  columns.forEach((column) => {
+    const parts = column.key.split('.');
+    let parentPath = '';
+    let siblings = rootChildren;
+
+    parts.forEach((part, index) => {
+      const currentPath = parentPath ? `${parentPath}.${part}` : part;
+      let node = pathMap.get(currentPath);
+
+      if (!node) {
+        node = {
+          path: currentPath,
+          label: index === parts.length - 1 ? column.label : part,
+          depth: index + 1,
+          parentPath,
+          column: index === parts.length - 1 ? column : undefined,
+          children: [],
+        };
+        pathMap.set(currentPath, node);
+        siblings.push(node);
+      } else if (index === parts.length - 1) {
+        node.column = column;
+        node.label = column.label;
+      }
+
+      parentPath = currentPath;
+      siblings = node.children;
+    });
+  });
+
+  return rootChildren;
+}
+
+function getMaxHeaderDepth(nodes: ColumnHeaderTreeNode[]): number {
+  let maxDepth = 0;
+
+  const traverse = (nodeList: ColumnHeaderTreeNode[]) => {
+    nodeList.forEach((node) => {
+      maxDepth = Math.max(maxDepth, node.depth);
+      if (node.children.length > 0) {
+        traverse(node.children);
+      }
+    });
   };
-  
-  export let searchMatchedRowIds: Set<string> = new Set(); // 검색된 행 ID들
-  export let searchFilteredColumnKeys: string[] | null = null; // 검색으로 필터링된 열 키들
-  
-  let scrollLeft = 0;
-  let header: HTMLDivElement;
-  let sortColumn: string | null = null;
-  let sortDirection: 'asc' | 'desc' = 'asc';
-  let filteredRows: Row[] = [];
-  let columnWidths: Map<string, number> = new Map();
-  let activeFilters: Map<string, string> = new Map(); // 컬럼 키 -> 필터 값
-  let resizingColumn: string | null = null;
-  let resizeStartX = 0;
-  let resizeStartWidth = 0;
-  let resizePreviewWidth = 0;
-  let resizeGuideLine: { x: number; visible: boolean } = { x: 0, visible: false };
-  let selectedColumns: Set<string> = new Set();
-  let showTransformDialog = false;
-  let openFilterColumn: string | null = null;
-  let contextMenu: { x: number; y: number; items: any[] } | null = null;
-  let showImageViewer = false;
-  let imageViewerUrl = '';
-  let isSelectingColumns = false;
-  let selectionStartColumn: string | null = null;
-  let lastClickedColumn: string | null = null;
-  let draggingColumn: string | null = null;
-  let dragOverColumn: string | null = null;
-  let dragStartX = 0;
-  let dragCurrentX = 0;
-  let dragColumnElement: HTMLElement | null = null;
-  let dragGhost: HTMLElement | null = null;
-  let dragColumnElementsCache: HTMLElement[] | null = null; // 열 요소 캐시
-  let dragAnimationFrame: number | null = null; // requestAnimationFrame ID
-  
-  // 셀 편집 상태
-  let editingCell: { rowId: string; columnKey: string } | null = null;
-  let editingValue: string = '';
 
-  const ROW_HEIGHT = 32;
-  const DEFAULT_COLUMN_WIDTH = 200;
-  const ROW_NUMBER_WIDTH = 60;
-  
-  // 설정에서 동적으로 가져오기
-  let maxVisibleRows = 50;
-  let bufferRows = 25;
-  
-  $: {
-    const settings = settingsStore.get();
-    maxVisibleRows = settings.maxVisibleRows;
-    bufferRows = settings.bufferRows;
+  traverse(nodes);
+  return Math.max(1, maxDepth);
+}
+
+function assignHeaderMetadata(nodes: ColumnHeaderTreeNode[], leafPositions: Map<string, number>): void {
+  const assignNode = (node: ColumnHeaderTreeNode): { startIndex: number; leafCount: number } => {
+    if (node.children.length === 0 && node.column) {
+      const startIndex = leafPositions.get(node.column.key) ?? 2;
+      node.startIndex = startIndex;
+      node.leafCount = 1;
+      return { startIndex, leafCount: 1 };
+    }
+
+    let startIndex = Number.MAX_SAFE_INTEGER;
+    let leafCount = 0;
+
+    node.children.forEach((child) => {
+      const childMeta = assignNode(child);
+      startIndex = Math.min(startIndex, childMeta.startIndex);
+      leafCount += childMeta.leafCount;
+    });
+
+    node.startIndex = startIndex === Number.MAX_SAFE_INTEGER ? 2 : startIndex;
+    node.leafCount = leafCount;
+
+    return { startIndex: node.startIndex, leafCount };
+  };
+
+  nodes.forEach(assignNode);
+}
+
+function collectHeaderGridItems(
+  nodes: ColumnHeaderTreeNode[],
+  depth: number
+): HeaderGridItem[] {
+  const items: HeaderGridItem[] = [];
+
+  const visit = (node: ColumnHeaderTreeNode) => {
+    if (node.children.length > 0) {
+      if (node.startIndex !== undefined && node.leafCount !== undefined && node.leafCount > 0) {
+        items.push({
+          path: node.path,
+          label: node.label,
+          gridColumn: `${node.startIndex} / ${node.startIndex + node.leafCount}`,
+          gridRow: `${node.depth}`,
+          isLeaf: false,
+        });
+      }
+      node.children.forEach(visit);
+      return;
+    }
+
+    if (node.column && node.startIndex !== undefined) {
+      items.push({
+        path: node.path,
+        label: node.label,
+        gridColumn: `${node.startIndex}`,
+        gridRow: `${node.depth} / ${depth + 1}`,
+        column: node.column,
+        isLeaf: true,
+      });
+    }
+  };
+
+  nodes.forEach(visit);
+  return items;
+}
+
+function buildColumnMetadata() {
+  arrayAwareColumns = data.columns.filter((col) => col.type === 'array');
+  buildDisplayColumns();
+}
+
+function buildDisplayColumns() {
+  displayColumns = [];
+  displayColumnMeta = new Map();
+
+  data.columns.forEach((column) => {
+    if (column.type === 'array') {
+      const fields = collectArrayFieldsForColumn(column.key);
+      if (fields.length === 0) {
+        displayColumns.push(column);
+        displayColumnMeta.set(column.key, {
+          kind: 'scalar',
+          baseColumnKey: column.key,
+        });
+        return;
+      }
+
+      fields.forEach((field) => {
+        const fieldPath = field === PRIMITIVE_ARRAY_FIELD_KEY ? [] : field.split('.');
+        const key =
+          field === PRIMITIVE_ARRAY_FIELD_KEY ? `${column.key}.${PRIMITIVE_ARRAY_FIELD_KEY}` : `${column.key}.${field}`;
+        const label = field === PRIMITIVE_ARRAY_FIELD_KEY ? 'value' : fieldPath[fieldPath.length - 1];
+        const pseudoColumn: Column = {
+          key,
+          label,
+          type: 'string',
+          width: column.width,
+        };
+        displayColumns.push(pseudoColumn);
+        displayColumnMeta.set(key, {
+          kind: 'array-child',
+          baseColumnKey: column.key,
+          parentKey: column.key,
+          fieldPath,
+        });
+      });
+    } else {
+      displayColumns.push(column);
+      displayColumnMeta.set(column.key, {
+        kind: 'scalar',
+        baseColumnKey: column.key,
+      });
+    }
+  });
+}
+
+function collectArrayFieldsForColumn(columnKey: string): string[] {
+  const fields = new Set<string>();
+  const sampleLimit = Math.min(data.rows.length, 200);
+
+  for (let i = 0; i < sampleLimit; i++) {
+    const row = data.rows[i];
+    if (!row) continue;
+    const cell = row.cells[columnKey];
+    const value = cell?.value;
+    if (Array.isArray(value)) {
+      value.forEach((entry) => {
+        collectFieldsFromEntry(entry, '', fields);
+      });
+    }
   }
 
-  interface ColumnGroup {
-    key: string;
-    label: string;
-    columns: Column[];
-    startIndex: number;
+  if (fields.size === 0) {
+    return [];
+  }
+  return Array.from(fields);
+}
+
+function collectFieldsFromEntry(entry: any, prefix: string, bucket: Set<string>) {
+  if (entry === null || entry === undefined) {
+    bucket.add(prefix || PRIMITIVE_ARRAY_FIELD_KEY);
+    return;
+  }
+  if (Array.isArray(entry)) {
+    if (entry.length === 0) {
+      bucket.add(prefix || PRIMITIVE_ARRAY_FIELD_KEY);
+      return;
+    }
+    collectFieldsFromEntry(entry[0], prefix, bucket);
+    return;
+  }
+  if (typeof entry === 'object') {
+    let hasChild = false;
+    Object.entries(entry).forEach(([key, value]) => {
+      hasChild = true;
+      const nextPrefix = prefix ? `${prefix}.${key}` : key;
+      collectFieldsFromEntry(value, nextPrefix, bucket);
+    });
+    if (!hasChild) {
+      bucket.add(prefix || PRIMITIVE_ARRAY_FIELD_KEY);
+    }
+    return;
+  }
+  bucket.add(prefix || PRIMITIVE_ARRAY_FIELD_KEY);
+}
+
+function recomputeDisplayStructures() {
+  buildColumnMetadata();
+  arrayDisplayCache.clear();
+  recomputeRowMetrics();
+  updateVisibleRows();
+}
+
+function recomputeRowMetrics() {
+  rowHeights = [];
+  rowOffsets = [];
+  rowDisplaySlotCount = new Map();
+
+  const limit = renderRowLimit >= 0 ? Math.min(filteredRows.length, renderRowLimit) : filteredRows.length;
+  let offset = 0;
+
+  for (let i = 0; i < limit; i++) {
+    const row = filteredRows[i];
+    const slotCount = Math.max(calculateRowSlotCount(row), 1);
+    const height = slotCount * rowHeight;
+    rowDisplaySlotCount.set(row.id, slotCount);
+    rowHeights.push(height);
+    rowOffsets.push(offset);
+    offset += height;
   }
 
-  // 컨테이너 크기 변경 감지
-  let resizeObserver: ResizeObserver | null = null;
-  
+  renderRowCount = limit;
+  totalTableHeight = offset;
+  tableBodyHeight = totalTableHeight;
+}
+
+function calculateRowSlotCount(row: Row | undefined): number {
+  if (!row) {
+    return 1;
+  }
+  if (arrayAwareColumns.length === 0) {
+    return 1;
+  }
+  let maxSlots = 1;
+  for (const column of arrayAwareColumns) {
+    const metrics = getArrayDisplayData(row, column.key);
+    if (!metrics || metrics.displayCount === 0) {
+      continue;
+    }
+    maxSlots = Math.max(maxSlots, Math.max(metrics.displayCount, 1));
+  }
+  return maxSlots;
+}
+
+function getChildArrayKey(rowId: string, columnKey: string): string {
+  return `${rowId}::${columnKey}`;
+}
+
+function getArrayDisplayData(row: Row, columnKey: string): ArrayDisplayMetrics | null {
+  let rowCache = arrayDisplayCache.get(row.id);
+  if (!rowCache) {
+    rowCache = new Map();
+    arrayDisplayCache.set(row.id, rowCache);
+  }
+  if (rowCache.has(columnKey)) {
+    return rowCache.get(columnKey)!;
+  }
+  const metrics = computeArrayDisplayMetrics(row, columnKey);
+  rowCache.set(columnKey, metrics);
+  return metrics;
+}
+
+function computeArrayDisplayMetrics(row: Row, columnKey: string): ArrayDisplayMetrics {
+  const cell = row.cells[columnKey];
+  const value = cell?.value;
+  const arrayValues = Array.isArray(value) ? value : [];
+  const totalCount = arrayValues.length;
+  if (totalCount === 0) {
+    return {
+      items: [],
+      showMore: false,
+      displayCount: 0,
+      totalCount: 0,
+    };
+  }
+
+  const key = getChildArrayKey(row.id, columnKey);
+  const isExpanded = expandedChildArrays.has(key);
+
+  if (maxChildArray < 0 || isExpanded || totalCount <= maxChildArray) {
+    return {
+      items: arrayValues,
+      showMore: false,
+      displayCount: Math.max(totalCount, 1),
+      totalCount,
+    };
+  }
+
+  const dataSlots = Math.max(maxChildArray - 1, 1);
+  const items = arrayValues.slice(0, dataSlots);
+  return {
+    items,
+    showMore: true,
+    displayCount: Math.max(maxChildArray, 1),
+    totalCount,
+  };
+}
+
+function getArrayEntryFieldValue(entry: any, fieldPath: string[] | undefined): any {
+  if (!fieldPath || fieldPath.length === 0) {
+    return entry;
+  }
+  let current = entry;
+  for (const part of fieldPath) {
+    if (current === null || current === undefined) {
+      return undefined;
+    }
+    current = current?.[part];
+  }
+  return current;
+}
+
   onMount(() => {
     const unsubscribe = dataStore.subscribe((value) => {
       // 데이터 참조가 실제로 변경되었을 때만 업데이트
       if (data !== value) {
         data = value;
         initializeColumnWidths();
-        // updateFilteredRows()는 reactive 문에서 처리하므로 여기서는 제거
+        buildColumnMetadata();
+        expandedChildArrays = new Set();
+        arrayDisplayCache.clear();
+        lastFilteredRowsRef = null;
+        updateStateAndDispatch();
       }
+    });
+    
+    const unsubscribeSettings = settingsStore.subscribe((value) => {
+      applySettings(value);
+      updateVisibleRows();
     });
 
     const handleClickOutside = () => {
@@ -119,6 +543,7 @@
 
     return () => {
       unsubscribe();
+      unsubscribeSettings();
       window.removeEventListener('click', handleClickOutside);
       if (resizeObserver && tableContainer) {
         resizeObserver.unobserve(tableContainer);
@@ -187,65 +612,7 @@
     document.removeEventListener('mouseup', stopResize);
   }
 
-  // getColumnGroups 캐시 (성능 최적화)
-  let lastColumnsRef: Column[] | null = null;
-  let cachedColumnGroups: ColumnGroup[] = [];
-  
-  function getColumnGroups(): ColumnGroup[] {
-    if (data.metadata.isFlat) {
-      return [];
-    }
-
-    // 컬럼 참조가 변경되지 않았으면 캐시 반환
-    if (data.columns === lastColumnsRef && cachedColumnGroups.length >= 0) {
-      return cachedColumnGroups;
-    }
-
-    const groups = new Map<string, Column[]>();
-    
-    data.columns.forEach((col) => {
-      const parts = col.key.split('.');
-      if (parts.length > 1) {
-        const groupKey = parts[0];
-        if (!groups.has(groupKey)) {
-          groups.set(groupKey, []);
-        }
-        groups.get(groupKey)!.push(col);
-      }
-    });
-
-    const result: ColumnGroup[] = [];
-    let currentIndex = 0;
-    
-    data.columns.forEach((col) => {
-      const parts = col.key.split('.');
-      if (parts.length > 1) {
-        const groupKey = parts[0];
-        if (groups.has(groupKey) && !result.find((g) => g.key === groupKey)) {
-          const groupColumns = groups.get(groupKey)!;
-          result.push({
-            key: groupKey,
-            label: groupKey,
-            columns: groupColumns,
-            startIndex: currentIndex,
-          });
-          currentIndex += groupColumns.length;
-        }
-      } else {
-        currentIndex++;
-      }
-    });
-
-    // 캐시 업데이트
-    lastColumnsRef = data.columns;
-    cachedColumnGroups = result;
-    return result;
-  }
-
-
   // 필터링 최적화: 캐싱 및 배치 처리
-  let lastFilterState: string = '';
-  let filterUpdateTimeout: ReturnType<typeof setTimeout> | null = null;
   
   function updateFilteredRows() {
     if (!data || !data.rows) {
@@ -370,8 +737,6 @@
   }
 
   // data 또는 검색 결과가 변경될 때 filteredRows 자동 업데이트 (debounced)
-  let lastDataRef: TableData | null = null;
-  let lastDataHash = '';
   
   // 데이터 해시 계산 (간단한 버전)
   function calculateDataHash(data: TableData): string {
@@ -390,19 +755,22 @@
       }
     }
   }
-  
-  // searchMatchedRowIds 변경 감지 (Set의 size 변경만 체크)
-  let lastSearchMatchedSize = 0;
-  $: {
-    const currentSize = searchMatchedRowIds?.size ?? 0;
-    if (currentSize !== lastSearchMatchedSize) {
-      lastSearchMatchedSize = currentSize;
-      lastFilterState = ''; // 강제 업데이트
-      updateStateAndDispatch();
-    }
+$: {
+  const currentSize = searchMatchedRowIds?.size ?? 0;
+  const refChanged = searchMatchedRowIds !== lastSearchMatchedRef;
+  if (refChanged || currentSize !== lastSearchMatchedSize) {
+    lastSearchMatchedRef = searchMatchedRowIds ?? null;
+    lastSearchMatchedSize = currentSize;
+    lastFilterState = ''; // 강제 업데이트
+    updateStateAndDispatch();
   }
+}
 
   function handleSort(columnKey: string) {
+    const columnMeta = displayColumnMeta.get(columnKey);
+    if (!columnMeta || columnMeta.kind !== 'scalar') {
+      return;
+    }
     if (sortColumn === columnKey) {
       sortDirection = sortDirection === 'asc' ? 'desc' : 'asc';
     } else {
@@ -452,47 +820,27 @@
     handleVirtualScroll(event);
   }
   
-  // 필터링된 행이 변경될 때 보이는 행 업데이트 (requestAnimationFrame으로 최적화)
-  let filterUpdateFrame: number | null = null;
-  let lastFilteredRowsRef: Row[] | null = null;
-  
-  $: {
-    // filteredRows 참조나 길이가 실제로 변경되었을 때만 업데이트
-    if (filteredRows !== lastFilteredRowsRef || filteredRows.length !== lastFilteredRowsLength) {
-      lastFilteredRowsRef = filteredRows;
-      lastFilteredRowsLength = filteredRows.length;
-      
-      if (filterUpdateFrame !== null) {
-        cancelAnimationFrame(filterUpdateFrame);
-      }
-      
-      filterUpdateFrame = requestAnimationFrame(() => {
-        if (filteredRows.length > 0) {
-          updateVisibleRows();
-        } else {
-          visibleRows = [];
-          visibleStartIndex = 0;
-          visibleEndIndex = 0;
-          lastFilteredRowsLength = 0;
-        }
-        filterUpdateFrame = null;
-      });
+// 필터링된 행이 변경될 때 행 높이/가상 스크롤 상태 갱신
+$: {
+  if (filteredRows !== lastFilteredRowsRef) {
+    lastFilteredRowsRef = filteredRows;
+    if (filterUpdateFrame !== null) {
+      cancelAnimationFrame(filterUpdateFrame);
     }
+    filterUpdateFrame = requestAnimationFrame(() => {
+      arrayDisplayCache.clear();
+      recomputeRowMetrics();
+      updateVisibleRows();
+      filterUpdateFrame = null;
+    });
   }
-  
-  let tableContainer: HTMLDivElement;
-  let scrollTop = 0;
-  let containerHeight = 0;
-  
-  // 가상 스크롤링: 보이는 행 범위 계산
-  let visibleStartIndex = 0;
-  let visibleEndIndex = 0;
-  let visibleRows: Row[] = [];
+}
+
+$: tableBodyHeight = totalTableHeight;
+$: topSpacerHeight = getRowOffsetByIndex(visibleStartIndex);
+$: bottomSpacerHeight = Math.max(totalTableHeight - getRowOffsetByIndex(visibleEndIndex), 0);
   
   // 원본 행 인덱스 맵 (성능 최적화) - 지연 업데이트 및 캐싱
-  let originalRowIndexMap = new Map<string, number>();
-  let lastDataRowsLength = 0;
-  let lastDataRowsRef: Row[] | null = null;
   
   function updateOriginalRowIndexMap() {
     // 데이터가 변경되지 않았으면 업데이트 스킵
@@ -542,95 +890,140 @@
     }
   }
   
-  // 가상 스크롤링: 보이는 행 계산 (최적화)
-  let lastScrollTop = -1;
-  let lastContainerHeight = -1;
-  let lastFilteredRowsLength = -1;
-  
-  function updateVisibleRows() {
-    if (!tableContainer || filteredRows.length === 0) {
-      visibleRows = [];
-      visibleStartIndex = 0;
-      visibleEndIndex = 0;
-      lastFilteredRowsLength = 0;
-      return;
-    }
-    
-    // tableContainer가 아직 마운트되지 않았으면 스킵
-    if (!tableContainer.getBoundingClientRect) {
-      return;
-    }
-    
-    const containerRect = tableContainer.getBoundingClientRect();
-    const newContainerHeight = containerRect.height;
-    const newScrollTop = tableContainer.scrollTop;
-    
-    // 스크롤 위치나 컨테이너 크기, 필터링된 행 수가 변경되지 않았으면 스킵
-    if (
-      lastScrollTop === newScrollTop &&
-      lastContainerHeight === newContainerHeight &&
-      lastFilteredRowsLength === filteredRows.length &&
-      visibleRows.length > 0
-    ) {
-      return;
-    }
-    
-    scrollTop = newScrollTop;
-    containerHeight = newContainerHeight;
-    lastScrollTop = newScrollTop;
-    lastContainerHeight = newContainerHeight;
-    lastFilteredRowsLength = filteredRows.length;
-    
-    // 보이는 행 범위 계산
-    const startRowIndex = Math.max(0, Math.floor(scrollTop / ROW_HEIGHT));
-    const endRowIndex = Math.min(filteredRows.length, Math.ceil((scrollTop + containerHeight) / ROW_HEIGHT));
-    
-    // 실제로 보이는 영역 크기 (이건 항상 렌더링되어야 함)
-    const visibleRange = endRowIndex - startRowIndex;
-    
-    // 버퍼 추가 (위/아래 각각 bufferRows)
-    const bufferedStart = Math.max(0, startRowIndex - bufferRows);
-    const bufferedEnd = Math.min(filteredRows.length, endRowIndex + bufferRows);
-    
-    // 버퍼 영역의 크기
-    const bufferedRange = bufferedEnd - bufferedStart;
-    
-    // 실제 보이는 영역은 항상 포함되어야 하므로, 최소한 보이는 영역만큼은 렌더링
-    // maxVisibleRows는 추가로 렌더링할 수 있는 최대 행 수
-    let newStartIndex = bufferedStart;
-    let newEndIndex = bufferedEnd;
-    
-    // 전체 버퍼 영역이 maxVisibleRows를 넘으면, 보이는 영역 중심으로 제한
-    if (bufferedRange > maxVisibleRows) {
-      // 보이는 영역이 maxVisibleRows보다 크면, 보이는 영역만 렌더링
-      if (visibleRange >= maxVisibleRows) {
-        newStartIndex = startRowIndex;
-        newEndIndex = endRowIndex;
-      } else {
-        // 보이는 영역 중심으로 위아래 버퍼 추가 (최대 maxVisibleRows개)
-        const remainingRows = maxVisibleRows - visibleRange;
-        const topBuffer = Math.floor(remainingRows / 2);
-        const bottomBuffer = remainingRows - topBuffer;
-        
-        newStartIndex = Math.max(0, startRowIndex - topBuffer);
-        newEndIndex = Math.min(filteredRows.length, endRowIndex + bottomBuffer);
-      }
-    }
-    
-    // 범위가 변경되지 않았으면 스킵
-    if (visibleStartIndex === newStartIndex && visibleEndIndex === newEndIndex && visibleRows.length > 0) {
-      return;
-    }
-    
-    visibleStartIndex = newStartIndex;
-    visibleEndIndex = newEndIndex;
-    
-    // 보이는 행 추출
-    visibleRows = filteredRows.slice(visibleStartIndex, visibleEndIndex);
+// 가상 스크롤링: 보이는 행 계산 (최적화)
+
+function updateVisibleRows() {
+  if (!tableContainer || renderRowCount === 0) {
+    visibleRows = [];
+    visibleStartIndex = 0;
+    visibleEndIndex = 0;
+    topSpacerHeight = 0;
+    bottomSpacerHeight = 0;
+    lastRenderRowCount = 0;
+    return;
   }
+
+  if (!tableContainer.getBoundingClientRect) {
+    return;
+  }
+
+  if (rowHeights.length !== renderRowCount) {
+    recomputeRowMetrics();
+  }
+
+  const containerRect = tableContainer.getBoundingClientRect();
+  const newContainerHeight = containerRect.height;
+  const newScrollTop = tableContainer.scrollTop;
+
+  if (
+    lastScrollTop === newScrollTop &&
+    lastContainerHeight === newContainerHeight &&
+    lastRenderRowCount === renderRowCount &&
+    visibleRows.length > 0
+  ) {
+    return;
+  }
+
+  lastScrollTop = newScrollTop;
+  lastContainerHeight = newContainerHeight;
+  lastRenderRowCount = renderRowCount;
+
+  let baseStart = findRowIndexByOffset(newScrollTop);
+  let baseEnd = findFirstRowStartingAfter(newScrollTop + newContainerHeight);
+  if (baseEnd <= baseStart) {
+    baseEnd = Math.min(renderRowCount, baseStart + 1);
+  }
+
+  const visibleRange = Math.max(baseEnd - baseStart, 1);
+  let bufferedStart = Math.max(0, baseStart - bufferRows);
+  let bufferedEnd = Math.min(renderRowCount, baseEnd + bufferRows);
+  const bufferedRange = bufferedEnd - bufferedStart;
+
+  if (maxVisibleRows > 0 && bufferedRange > maxVisibleRows) {
+    if (visibleRange >= maxVisibleRows) {
+      bufferedStart = baseStart;
+      bufferedEnd = Math.min(renderRowCount, baseStart + maxVisibleRows);
+    } else {
+      const remainingRows = maxVisibleRows - visibleRange;
+      const topBuffer = Math.floor(remainingRows / 2);
+      const bottomBuffer = remainingRows - topBuffer;
+      bufferedStart = Math.max(0, baseStart - topBuffer);
+      bufferedEnd = Math.min(renderRowCount, baseEnd + bottomBuffer);
+    }
+  }
+
+  if (bufferedEnd <= bufferedStart) {
+    bufferedEnd = Math.min(renderRowCount, bufferedStart + 1);
+  }
+
+  if (visibleStartIndex === bufferedStart && visibleEndIndex === bufferedEnd && visibleRows.length > 0) {
+    return;
+  }
+
+  visibleStartIndex = bufferedStart;
+  visibleEndIndex = bufferedEnd;
+  visibleRows = filteredRows.slice(visibleStartIndex, visibleEndIndex);
+
+  topSpacerHeight = getRowOffsetByIndex(visibleStartIndex);
+  bottomSpacerHeight = Math.max(totalTableHeight - getRowOffsetByIndex(visibleEndIndex), 0);
+}
+
+function findRowIndexByOffset(offset: number): number {
+  if (renderRowCount === 0) {
+    return 0;
+  }
+  let low = 0;
+  let high = renderRowCount - 1;
+  let result = 0;
+  while (low <= high) {
+    const mid = Math.floor((low + high) / 2);
+    const start = rowOffsets[mid] ?? 0;
+    const height = rowHeights[mid] ?? rowHeight;
+    const end = start + height;
+    if (offset < start) {
+      result = mid;
+      high = mid - 1;
+    } else if (offset >= end) {
+      low = mid + 1;
+      result = Math.min(low, renderRowCount - 1);
+    } else {
+      return mid;
+    }
+  }
+  return Math.max(0, Math.min(result, renderRowCount - 1));
+}
+
+function findFirstRowStartingAfter(offset: number): number {
+  if (renderRowCount === 0) {
+    return 0;
+  }
+  let low = 0;
+  let high = renderRowCount - 1;
+  let result = renderRowCount;
+  while (low <= high) {
+    const mid = Math.floor((low + high) / 2);
+    const start = rowOffsets[mid] ?? 0;
+    if (start >= offset) {
+      result = mid;
+      high = mid - 1;
+    } else {
+      low = mid + 1;
+    }
+  }
+  return Math.min(Math.max(result, 0), renderRowCount);
+}
+
+function getRowOffsetByIndex(index: number): number {
+  if (index <= 0) {
+    return 0;
+  }
+  if (index >= rowOffsets.length) {
+    return totalTableHeight;
+  }
+  return rowOffsets[index] ?? totalTableHeight;
+}
   
   // 스크롤 이벤트 핸들러 최적화 (requestAnimationFrame 사용)
-  let scrollAnimationFrame: number | null = null;
   
   function handleVirtualScroll(event: Event) {
     const target = event.target as HTMLDivElement;
@@ -653,15 +1046,16 @@
   }
 
   // 외부에서 호출 가능한 네비게이션 함수
-  export function navigateToCell(rowId: string, columnKey: string) {
-    const rowIndex = filteredRows.findIndex(row => row.id === rowId);
-    if (rowIndex === -1) return;
-    
-    // 행으로 스크롤
-    const targetScrollTop = rowIndex * ROW_HEIGHT;
-    if (tableContainer) {
-      tableContainer.scrollTop = Math.max(0, targetScrollTop - 100); // 약간의 여유 공간
-    }
+export function navigateToCell(rowId: string, columnKey: string) {
+  const rowIndex = filteredRows.findIndex((row) => row.id === rowId);
+  if (rowIndex === -1) {
+    return;
+  }
+
+  if (tableContainer) {
+    const targetScrollTop = Math.max(0, getRowOffsetByIndex(rowIndex) - rowHeight);
+    tableContainer.scrollTop = targetScrollTop;
+  }
     
     // 컬럼으로 스크롤
     const columnIndex = flatColumns.findIndex(col => col.key === columnKey);
@@ -704,14 +1098,23 @@
     }
   }
 
-  export function navigateToRow(rowId: string) {
-    const rowIndex = filteredRows.findIndex(row => row.id === rowId);
-    if (rowIndex === -1) return;
-    
-    const targetScrollTop = rowIndex * ROW_HEIGHT;
-    if (tableContainer) {
-      tableContainer.scrollTop = Math.max(0, targetScrollTop - 100);
-    }
+  function scrollToColumn(columnKey: string) {
+    if (!columnKey) return;
+    requestAnimationFrame(() => {
+      navigateToColumn(columnKey);
+    });
+  }
+
+export function navigateToRow(rowId: string) {
+  const rowIndex = filteredRows.findIndex((row) => row.id === rowId);
+  if (rowIndex === -1) {
+    return;
+  }
+
+  if (tableContainer) {
+    const targetScrollTop = Math.max(0, getRowOffsetByIndex(rowIndex) - rowHeight);
+    tableContainer.scrollTop = targetScrollTop;
+  }
   }
 
   function startCellEdit(rowId: string, columnKey: string) {
@@ -758,7 +1161,12 @@
     editingValue = '';
   }
   
-  function handleCellClick(rowId: string, columnKey: string, event: MouseEvent) {
+  function handleCellClick(rowId: string, columnKey: string, event: MouseEvent | KeyboardEvent) {
+    const meta = displayColumnMeta.get(columnKey);
+    if (!meta || meta.kind !== 'scalar') {
+      event.stopPropagation();
+      return;
+    }
     // 이미 편집 중인 셀이 있으면 커밋
     if (editingCell) {
       if (editingCell.rowId !== rowId || editingCell.columnKey !== columnKey) {
@@ -772,6 +1180,26 @@
     // 새 셀 편집 시작
     startCellEdit(rowId, columnKey);
     event.stopPropagation();
+  }
+
+  function handleCellKeyActivation(event: KeyboardEvent, rowId: string, columnKey: string) {
+    if (event.key !== 'Enter' && event.key !== ' ') {
+      return;
+    }
+    event.preventDefault();
+    handleCellClick(rowId, columnKey, event);
+  }
+
+  function getColumnDisplayLabel(column: Column): string {
+    const baseLabel = column.label ?? column.key;
+    const shouldTrim = baseLabel.includes('.') || column.key.includes('.');
+    if (!shouldTrim) {
+      return baseLabel;
+    }
+    const source = baseLabel.includes('.') ? baseLabel : column.key;
+    const parts = source.split('.');
+    const last = parts[parts.length - 1];
+    return last || baseLabel;
   }
   
   function handleCellKeydown(event: KeyboardEvent, rowId: string, columnKey: string) {
@@ -822,9 +1250,33 @@
     if (typeof cell === 'object') return JSON.stringify(cell);
     return String(cell);
   }
+function formatNestedArrayValue(value: any): string {
+  if (value === null || value === undefined) {
+    return '';
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => formatNestedArrayValue(item)).join('\n');
+  }
+  if (typeof value === 'object') {
+    return JSON.stringify(value);
+  }
+  return String(value);
+}
+
+function toggleChildArrayExpansion(rowId: string, columnKey: string) {
+  const key = getChildArrayKey(rowId, columnKey);
+  if (expandedChildArrays.has(key)) {
+    expandedChildArrays.delete(key);
+  } else {
+    expandedChildArrays.add(key);
+  }
+  expandedChildArrays = new Set(expandedChildArrays);
+  arrayDisplayCache.delete(rowId);
+  recomputeRowMetrics();
+  updateVisibleRows();
+}
 
   // 이미지 URL 캐시 (성능 최적화)
-  const imageUrlCache = new Map<string, boolean>();
   
   function isImageUrl(value: any): boolean {
     if (typeof value !== 'string') return false;
@@ -1022,7 +1474,7 @@
   }
 
   // 열 선택 핸들러
-  function handleColumnClick(columnKey: string, event: MouseEvent) {
+  function handleColumnClick(columnKey: string, event: MouseEvent | KeyboardEvent) {
     if (event.ctrlKey || event.metaKey) {
       // Ctrl/Cmd + 클릭: 토글 선택
       if (selectedColumns.has(columnKey)) {
@@ -1053,6 +1505,17 @@
         selectedColumns = selectedColumns; // Svelte reactivity
         lastClickedColumn = columnKey;
       }
+    }
+  }
+
+  function handleHeaderKeydown(event: KeyboardEvent, columnKey: string) {
+    if (event.key !== 'Enter' && event.key !== ' ') {
+      return;
+    }
+    event.preventDefault();
+    handleColumnClick(columnKey, event);
+    if (!event.defaultPrevented) {
+      handleSort(columnKey);
     }
   }
 
@@ -1138,6 +1601,7 @@
 
   function startColumnDrag(columnKey: string, event: MouseEvent, element: HTMLElement) {
     draggingColumn = columnKey;
+    draggingColumnParentKey = columnParentMap.get(columnKey) ?? getColumnParentKey(columnKey);
     dragColumnElement = element;
     dragStartX = event.clientX;
     dragCurrentX = event.clientX;
@@ -1206,7 +1670,18 @@
       
       dragColumnElementsCache.forEach((el) => {
         const colKey = el.dataset.columnKey;
-        if (!colKey || colKey === draggingColumn) return;
+        if (!colKey || colKey === draggingColumn) {
+          el.classList.remove('drag-over-left', 'drag-over-right', 'drag-disabled');
+          return;
+        }
+
+        const targetParent = columnParentMap.get(colKey) ?? getColumnParentKey(colKey);
+        if (targetParent !== draggingColumnParentKey) {
+          el.classList.remove('drag-over-left', 'drag-over-right');
+          el.classList.add('drag-disabled');
+          return;
+        }
+        el.classList.remove('drag-disabled');
         
         const elRect = el.getBoundingClientRect();
         const centerX = elRect.left + elRect.width / 2;
@@ -1271,7 +1746,7 @@
       
       // 드래그 오버 클래스 제거 (캐시된 요소 사용)
       dragColumnElementsCache.forEach(el => {
-        el.classList.remove('drag-over-left', 'drag-over-right');
+        el.classList.remove('drag-over-left', 'drag-over-right', 'drag-disabled');
       });
       
       moveColumn(sourceColumnKey, targetColumnKey, insertBefore);
@@ -1300,6 +1775,7 @@
     draggingColumn = null;
     dragOverColumn = null;
     dragColumnElementsCache = null; // 캐시 정리
+    draggingColumnParentKey = '';
     
     document.removeEventListener('mousemove', handleColumnDrag);
     document.removeEventListener('mouseup', endColumnDrag);
@@ -1313,6 +1789,14 @@
       const targetIndex = data.columns.findIndex(c => c.key === targetColumnKey);
       
       if (sourceIndex === -1 || targetIndex === -1) return data;
+      
+      const sourceColumn = data.columns[sourceIndex];
+      const targetColumn = data.columns[targetIndex];
+      const sourceParent = getColumnParentKey(sourceColumn.key);
+      const targetParent = getColumnParentKey(targetColumn.key);
+      if (sourceParent !== targetParent) {
+        return data;
+      }
       
       // 열 제거
       const [movedColumn] = data.columns.splice(sourceIndex, 1);
@@ -1334,96 +1818,111 @@
 
   // 열 추가/삭제 함수
   function addColumn(position: 'left' | 'right' | 'inside' | 'outside', referenceColumnKey?: string, groupName?: string) {
+    let createdColumnKey: string | null = null;
+    
     dataStore.update((data) => {
-      const newColumnKey = `column_${Date.now()}`;
+      const newColumnId = `column_${Date.now()}`;
       const columnName = generateColumnName(data);
+      const referenceColumn = referenceColumnKey ? data.columns.find((c) => c.key === referenceColumnKey) : undefined;
+      const referenceParent = referenceColumn ? getColumnParentKey(referenceColumn.key) : '';
       
-      let finalKey = newColumnKey;
-      let finalLabel = columnName;
-      
-      // 그룹 내부/외부 추가 처리
-      if (position === 'inside' && referenceColumnKey && groupName) {
-        // 그룹 내부에 추가 (예: "user.name" -> "user.newColumn")
-        const refColumn = data.columns.find(c => c.key === referenceColumnKey);
-        if (refColumn) {
-          const parts = refColumn.key.split('.');
-          if (parts.length > 1) {
-            // 이미 그룹 내부에 있음 - 같은 그룹에 추가
-            const groupPrefix = parts[0];
-            finalKey = `${groupPrefix}.${newColumnKey}`;
-            finalLabel = columnName;
-          } else {
-            // 그룹이 없으면 새로 생성
-            finalKey = `${groupName}.${newColumnKey}`;
-            finalLabel = columnName;
-          }
-        } else {
-          // 참조 열을 찾을 수 없으면 그룹 이름으로 생성
-          finalKey = `${groupName}.${newColumnKey}`;
-          finalLabel = columnName;
-        }
-      } else if (position === 'outside' && referenceColumnKey) {
-        // 그룹 외부에 추가 (그룹 해제)
-        finalKey = newColumnKey;
-        finalLabel = columnName;
+      let parentPath = '';
+      if (position === 'inside') {
+        parentPath = referenceParent || groupName || '';
       }
       
+      let finalKey = parentPath ? `${parentPath}.${newColumnId}` : newColumnId;
       const newColumn: Column = {
         key: finalKey,
-        label: finalLabel,
+        label: columnName,
         type: 'string',
         width: DEFAULT_COLUMN_WIDTH,
       };
 
-      let insertIndex = 0;
+      let insertIndex = data.columns.length;
       if (referenceColumnKey) {
         const refIndex = data.columns.findIndex((c) => c.key === referenceColumnKey);
         if (refIndex !== -1) {
           if (position === 'left') {
             insertIndex = refIndex;
-          } else if (position === 'right') {
+          } else if (position === 'right' || position === 'outside') {
             insertIndex = refIndex + 1;
           } else if (position === 'inside') {
-            // 그룹 내부에 추가: 참조 열 다음에 같은 그룹의 열들이 있으면 그 뒤에 추가
-            const refColumn = data.columns[refIndex];
-            const parts = refColumn.key.split('.');
-            if (parts.length > 1) {
-              // 이미 그룹 내부에 있음
-              const groupPrefix = parts[0];
-              let nextIndex = refIndex + 1;
-              while (nextIndex < data.columns.length) {
-                const nextCol = data.columns[nextIndex];
-                if (nextCol.key.startsWith(groupPrefix + '.')) {
-                  nextIndex++;
+            if (parentPath) {
+              let lastIndex = refIndex;
+              for (let i = refIndex + 1; i < data.columns.length; i += 1) {
+                if (getColumnParentKey(data.columns[i].key) === parentPath) {
+                  lastIndex = i;
                 } else {
                   break;
                 }
               }
-              insertIndex = nextIndex;
+              insertIndex = lastIndex + 1;
             } else {
-              // 그룹이 없으면 참조 열 다음에 추가
               insertIndex = refIndex + 1;
             }
-          } else {
-            insertIndex = refIndex + 1;
           }
         } else {
           insertIndex = position === 'left' ? 0 : data.columns.length;
         }
-      } else {
-        insertIndex = position === 'left' ? 0 : data.columns.length;
+      } else if (position === 'left') {
+        insertIndex = 0;
       }
 
       data.columns.splice(insertIndex, 0, newColumn);
 
-      // 모든 행에 새 열의 셀 추가
       data.rows.forEach((row) => {
         row.cells[finalKey] = { value: '', type: 'string' };
       });
 
       data.metadata.columnCount = data.columns.length;
+      createdColumnKey = finalKey;
       return data;
     });
+
+    if (createdColumnKey) {
+      scrollToColumn(createdColumnKey);
+    }
+  }
+
+  function addColumnAtEnd() {
+    addColumn('right');
+  }
+
+  function addColumnToGroup(groupKey: string) {
+    if (!groupKey) return;
+    let createdColumnKey: string | null = null;
+
+    dataStore.update((data) => {
+      const newColumnId = `column_${Date.now()}`;
+      const columnName = generateColumnName(data);
+      const finalKey = `${groupKey}.${newColumnId}`;
+      const newColumn: Column = {
+        key: finalKey,
+        label: columnName,
+        type: 'string',
+        width: DEFAULT_COLUMN_WIDTH,
+      };
+
+      let insertIndex = data.columns.length;
+      for (let i = 0; i < data.columns.length; i += 1) {
+        if (data.columns[i].key.startsWith(`${groupKey}.`)) {
+          insertIndex = i + 1;
+        }
+      }
+
+      data.columns.splice(insertIndex, 0, newColumn);
+      data.rows.forEach((row) => {
+        row.cells[finalKey] = { value: '', type: 'string' };
+      });
+      data.metadata.columnCount = data.columns.length;
+      createdColumnKey = finalKey;
+      return data;
+    });
+
+    if (createdColumnKey) {
+      scrollToColumn(createdColumnKey);
+    }
   }
 
   function deleteColumn(columnKey: string) {
@@ -1564,6 +2063,8 @@
 
   // 열 복사 함수
   function duplicateColumn(columnKey: string, position: 'left' | 'right') {
+    let duplicatedColumnKey: string | null = null;
+    
     dataStore.update((data) => {
       const sourceColumn = data.columns.find((c) => c.key === columnKey);
       if (!sourceColumn) return data;
@@ -1596,8 +2097,13 @@
       });
 
       data.metadata.columnCount = data.columns.length;
+      duplicatedColumnKey = newColumnKey;
       return data;
     });
+
+    if (duplicatedColumnKey) {
+      scrollToColumn(duplicatedColumnKey);
+    }
   }
 
   // 행 추가/삭제 함수
@@ -1703,7 +2209,10 @@
   }
 
   // 컨텍스트 메뉴 핸들러
-  function handleContextMenu(event: MouseEvent, target: { type: 'column' | 'row' | 'cell' | 'group'; key?: string; rowId?: string; groupKey?: string }) {
+  function handleContextMenu(
+    event: MouseEvent,
+    target: { type: 'column' | 'row' | 'cell' | 'group' | 'header-empty'; key?: string; rowId?: string; groupKey?: string }
+  ) {
     event.preventDefault();
     event.stopPropagation();
 
@@ -1711,6 +2220,8 @@
 
     if (target.type === 'group' && target.groupKey) {
       items.push(
+        { label: '하위에 열 추가', icon: 'add', action: () => addColumnToGroup(target.groupKey!) },
+        { divider: true },
         { label: '그룹만 삭제 (그룹 해제)', icon: 'ungroup', action: () => ungroupColumns(target.groupKey!) },
         { label: '그룹과 모든 열 삭제', icon: 'delete', action: () => deleteGroupWithColumns(target.groupKey!) }
       );
@@ -1771,6 +2282,10 @@
         { divider: true },
         { label: '행 삭제', icon: 'delete', action: () => deleteRow(target.rowId!) }
       );
+    } else if (target.type === 'header-empty') {
+      items.push(
+        { label: '마지막에 열 추가', icon: 'add', action: () => addColumnAtEnd() }
+      );
     }
 
     contextMenu = {
@@ -1784,226 +2299,109 @@
     contextMenu = null;
   }
 
-
-  // Grid 컬럼 템플릿 계산 (캐싱 최적화)
-  let headerGridTemplateColumns = '';
-  let headerGridItems: Array<{
-    element: 'row-number' | 'group-header' | 'ungrouped-header' | 'grouped-header';
-    gridColumn: string;
-    gridRow: string;
-    column?: Column;
-    group?: ColumnGroup;
-    width: number;
-  }> = [];
-  let lastTopHeaderColumnsRef: typeof topHeaderColumns | null = null;
-  let lastColumnWidthsHash = '';
-
-  $: {
-    // topHeaderColumns나 columnWidths가 변경되었을 때만 재계산
-    const currentColumnWidthsHash = Array.from(columnWidths.entries()).sort().join(',');
-    const needsUpdate = 
-      columnGroups.length > 0 && 
-      (topHeaderColumns !== lastTopHeaderColumnsRef || currentColumnWidthsHash !== lastColumnWidthsHash);
-    
-    if (needsUpdate) {
-      lastTopHeaderColumnsRef = topHeaderColumns;
-      lastColumnWidthsHash = currentColumnWidthsHash;
-      
-      // Grid 템플릿 컬럼 계산
-      const columns: string[] = [`${ROW_NUMBER_WIDTH}px`];
-      const items: typeof headerGridItems = [];
-      
-      let colStart = 2; // row-number가 1부터 시작하므로 2부터
-      
-      // Row number는 1층과 2층 모두 차지
-      items.push({
-        element: 'row-number',
-        gridColumn: '1',
-        gridRow: '1 / 3',
-        width: ROW_NUMBER_WIDTH,
-      });
-
-      // 각 topHeaderColumn을 처리
-      topHeaderColumns.forEach((item) => {
-        if (item.type === 'group' && item.group) {
-          const groupColCount = item.group.columns.length;
-          
-          // 그룹 내 각 컬럼의 너비를 columns에 추가
-          item.group.columns.forEach((col) => {
-            const colWidth = getColumnWidth(col.key);
-            columns.push(`${colWidth}px`);
-          });
-          
-          // 그룹 헤더 (1층, 그룹의 모든 컬럼 span)
-          items.push({
-            element: 'group-header',
-            gridColumn: `${colStart} / ${colStart + groupColCount}`,
-            gridRow: '1',
-            group: item.group,
-            width: item.group.columns.reduce((sum, col) => sum + getColumnWidth(col.key), 0),
-          });
-          
-          // 그룹 내 각 컬럼 (2층)
-          item.group.columns.forEach((col, idx) => {
-            items.push({
-              element: 'grouped-header',
-              gridColumn: `${colStart + idx}`,
-              gridRow: '2',
-              column: col,
-              width: getColumnWidth(col.key),
-            });
-          });
-          
-          colStart += groupColCount;
-        } else if (item.type === 'column' && item.column) {
-          const colWidth = getColumnWidth(item.column.key);
-          columns.push(`${colWidth}px`);
-          
-          // 그룹화되지 않은 컬럼 (1층과 2층 병합)
-          items.push({
-            element: 'ungrouped-header',
-            gridColumn: `${colStart}`,
-            gridRow: '1 / 3',
-            column: item.column,
-            width: colWidth,
-          });
-          colStart++;
-        }
-      });
-      
-      headerGridTemplateColumns = columns.join(' ');
-      headerGridItems = items;
-    } else if (columnGroups.length === 0) {
-      headerGridTemplateColumns = '';
-      headerGridItems = [];
+  function handleHeaderContextMenu(event: MouseEvent) {
+    const targetElement = event.target as HTMLElement;
+    if (targetElement.closest('[data-column-key]') || targetElement.closest('[data-group-path]')) {
+      return;
     }
+    handleContextMenu(event, { type: 'header-empty' });
   }
 
-  let columnGroups: ColumnGroup[] = [];
-  let flatColumns: Column[] = [];
-  let topHeaderColumns: Array<{ type: 'group' | 'column'; group?: ColumnGroup; column?: Column }> = [];
+$: headerScrollStyle =
+  maxHeaderRows > 0 ? `max-height: ${maxHeaderRows * HEADER_ROW_HEIGHT}px; overflow-y: auto;` : '';
 
-  // data 또는 열 필터링이 변경될 때 컬럼 정보 업데이트
-  // searchFilteredColumnKeys를 명시적으로 dependency로 포함
-  $: if (data && data.columns && searchFilteredColumnKeys !== undefined) {
-    if (data.columns.length > 0) {
-      // 열 필터링 적용
-      let columnsToShow = data.columns;
-      if (searchFilteredColumnKeys && searchFilteredColumnKeys.length > 0) {
-        // 여러 열 필터링
-        columnsToShow = data.columns.filter(col => searchFilteredColumnKeys!.includes(col.key));
-      }
-      
-      columnGroups = getColumnGroups();
-      flatColumns = columnsToShow; // 필터링된 컬럼 사용
-      
-      // 1층 헤더용 컬럼 순서 (그룹화된 컬럼은 첫 번째만, 그룹화되지 않은 컬럼은 모두)
-      const result: Array<{ type: 'group' | 'column'; group?: ColumnGroup; column?: Column }> = [];
-      const processedGroups = new Set<string>();
-      
-      flatColumns.forEach((col) => {
-        const group = columnGroups.find((g) => g.columns.some((c) => c.key === col.key));
-        if (group && !processedGroups.has(group.key)) {
-          processedGroups.add(group.key);
-          result.push({ type: 'group', group });
-        } else if (!group) {
-          result.push({ type: 'column', column: col });
+// data 또는 열 필터링이 변경될 때 컬럼 정보 업데이트
+$: if (data && displayColumns) {
+  if (displayColumns.length > 0) {
+    let columnsToShow = displayColumns;
+    if (searchFilteredColumnKeys && searchFilteredColumnKeys.length > 0) {
+      columnsToShow = displayColumns.filter((col) => {
+        const meta = displayColumnMeta.get(col.key);
+        if (!meta) return true;
+        if (meta.kind === 'scalar') {
+          return searchFilteredColumnKeys!.includes(meta.baseColumnKey);
         }
+        return (
+          (meta.baseColumnKey && searchFilteredColumnKeys!.includes(meta.baseColumnKey)) ||
+          (meta.parentKey && searchFilteredColumnKeys!.includes(meta.parentKey))
+        );
       });
-      
-      topHeaderColumns = result;
-    } else {
-      columnGroups = [];
-      flatColumns = [];
-      topHeaderColumns = [];
     }
+
+    flatColumns = columnsToShow;
+    columnParentMap = new Map(flatColumns.map((col) => [col.key, getColumnParentKey(col.key)]));
+
+    columnHeaderTree = buildColumnHeaderTree(columnsToShow);
+    headerDepth = getMaxHeaderDepth(columnHeaderTree);
+    hasNestedHeaders = headerDepth > 1;
+
+    const leafPositions = new Map<string, number>();
+    flatColumns.forEach((col, index) => {
+      leafPositions.set(col.key, index + 2);
+    });
+
+    assignHeaderMetadata(columnHeaderTree, leafPositions);
+    headerGridItems = collectHeaderGridItems(columnHeaderTree, headerDepth);
+
+    const columns: string[] = [`${ROW_NUMBER_WIDTH}px`];
+    flatColumns.forEach((col) => {
+      columns.push(`${getColumnWidth(col.key)}px`);
+    });
+    headerGridTemplateColumns = columns.join(' ');
+    headerGridRowStyle = `grid-template-rows: repeat(${headerDepth}, ${HEADER_ROW_HEIGHT}px);`;
+  } else {
+    flatColumns = [];
+    columnHeaderTree = [];
+    headerGridItems = [];
+    headerGridTemplateColumns = `${ROW_NUMBER_WIDTH}px`;
+    headerGridRowStyle = `grid-template-rows: repeat(1, ${HEADER_ROW_HEIGHT}px);`;
+    headerDepth = 1;
+    hasNestedHeaders = false;
+    columnParentMap = new Map();
   }
+} else {
+  flatColumns = [];
+  columnHeaderTree = [];
+  headerGridItems = [];
+  headerGridTemplateColumns = `${ROW_NUMBER_WIDTH}px`;
+  headerGridRowStyle = `grid-template-rows: repeat(1, ${HEADER_ROW_HEIGHT}px);`;
+  headerDepth = 1;
+  hasNestedHeaders = false;
+  columnParentMap = new Map();
+}
 </script>
 
 <div class="table-container" bind:this={tableContainer} on:scroll={handleScroll}>
-  <div class="table-header" bind:this={header}>
-    {#if columnGroups.length > 0}
-      <!-- 2층 헤더 구조 (Grid) -->
-      <div
-        class="header-grid"
-        style="grid-template-columns: {headerGridTemplateColumns};"
-      >
-        {#each headerGridItems as item}
-          {#if item.element === 'row-number'}
-            <div
-              class="table-cell header-cell row-number-header"
-              style="grid-row: {item.gridRow}; display: flex; justify-content: center; font-size: 1rem"
-            >
-              #
-            </div>
-          {:else if item.element === 'group-header' && item.group}
-            {@const group = item.group}
-            <div
-              class="table-cell header-cell group-header {group.key ? '' : 'empty-group'}"
-              style="grid-column: {item.gridColumn}; grid-row: {item.gridRow};"
-              role="columnheader"
-              tabindex="-1"
-              on:contextmenu={(e) => handleContextMenu(e, { type: 'group', groupKey: group.key })}
-            >
-              {group.label || group.key || ''}
-            </div>
-          {:else if item.element === 'ungrouped-header' && item.column}
+  <div class="table-header" bind:this={header} role="presentation" on:contextmenu={handleHeaderContextMenu}>
+    {#if hasNestedHeaders}
+      <div class="header-grid-wrapper" style={headerScrollStyle}>
+        <div
+          class="header-grid"
+          style={`grid-template-columns: ${headerGridTemplateColumns}; ${headerGridRowStyle}`}
+        >
+        <div
+          class="table-cell header-cell row-number-header"
+          style={`grid-column: 1 / 2; grid-row: 1 / ${headerDepth + 1}; display: flex; justify-content: center; font-size: 1rem`}
+        >
+          #
+        </div>
+        {#each headerGridItems as item (item.path)}
+          {#if item.isLeaf && item.column}
             {@const col = item.column}
-            <div
-              class="table-cell header-cell merged-header {selectedColumns.has(col.key) ? 'selected' : ''} {draggingColumn === col.key ? 'dragging' : ''}"
-              style="grid-column: {item.gridColumn}; grid-row: {item.gridRow};"
-              data-column-key={col.key}
-              role="columnheader"
-              tabindex="-1"
-              on:contextmenu={(e) => handleContextMenu(e, { type: 'column', key: col.key })}
-              on:mousedown={(e) => handleColumnMouseDown(col.key, e)}
-            >
-              <div class="header-content">
-                <span
-                  class="header-label"
-                  role="button"
-                  tabindex="0"
-                  on:click={(e) => {
-                    handleColumnClick(col.key, e);
-                    if (!e.defaultPrevented) {
-                      handleSort(col.key);
-                    }
-                  }}
-                  on:keydown={(e) => e.key === 'Enter' && handleSort(col.key)}
-                >
-                  {col.label}
-                </span>
-                {#if sortColumn === col.key}
-                  <span class="sort-indicator material-icons">{sortDirection === 'asc' ? 'arrow_upward' : 'arrow_downward'}</span>
-                {/if}
-                <ColumnFilter
-                  {data}
-                  column={col}
-                  columnWidth={getColumnWidth(col.key)}
-                  onFilter={handleFilter}
-                  onTransform={openTransformDialog}
-                  isOpen={openFilterColumn === col.key}
-                  onToggle={(key) => {
-                    openFilterColumn = openFilterColumn === key ? null : key;
-                  }}
-                />
-              </div>
-              <div
-                class="resize-handle"
-                role="button"
-                tabindex="0"
-                on:mousedown={(e) => startResize(col.key, e)}
-              ></div>
-            </div>
-          {:else if item.element === 'grouped-header' && item.column}
-            {@const col = item.column}
+            {@const columnMeta = displayColumnMeta.get(col.key)}
             <div
               class="table-cell header-cell {selectedColumns.has(col.key) ? 'selected' : ''} {draggingColumn === col.key ? 'dragging' : ''}"
-              style="grid-column: {item.gridColumn}; grid-row: {item.gridRow};"
+              style={`grid-column: ${item.gridColumn}; grid-row: ${item.gridRow};`}
               data-column-key={col.key}
               role="columnheader"
               tabindex="-1"
-              on:contextmenu={(e) => handleContextMenu(e, { type: 'column', key: col.key })}
+              on:contextmenu={(e) => {
+                if (columnMeta?.kind !== 'scalar') {
+                  e.preventDefault();
+                  return;
+                }
+                handleContextMenu(e, { type: 'column', key: col.key });
+              }}
               on:mousedown={(e) => handleColumnMouseDown(col.key, e)}
             >
               <div class="header-content">
@@ -2013,28 +2411,30 @@
                   tabindex="0"
                   on:click={(e) => {
                     handleColumnClick(col.key, e);
-                    if (!e.defaultPrevented) {
+                    if (!e.defaultPrevented && columnMeta?.kind === 'scalar') {
                       handleSort(col.key);
                     }
                   }}
-                  on:keydown={(e) => e.key === 'Enter' && handleSort(col.key)}
+                  on:keydown={(e) => handleHeaderKeydown(e, col.key)}
                 >
-                  {col.key.split('.').slice(1).join('.') || col.label}
+                  {getColumnDisplayLabel(col)}
                 </span>
                 {#if sortColumn === col.key}
                   <span class="sort-indicator material-icons">{sortDirection === 'asc' ? 'arrow_upward' : 'arrow_downward'}</span>
                 {/if}
-                <ColumnFilter
-                  {data}
-                  column={col}
-                  columnWidth={getColumnWidth(col.key)}
-                  onFilter={handleFilter}
-                  onTransform={openTransformDialog}
-                  isOpen={openFilterColumn === col.key}
-                  onToggle={(key) => {
-                    openFilterColumn = openFilterColumn === key ? null : key;
-                  }}
-                />
+                {#if columnMeta?.kind === 'scalar'}
+                  <ColumnFilter
+                    {data}
+                    column={col}
+                    columnWidth={getColumnWidth(col.key)}
+                    onFilter={handleFilter}
+                    onTransform={openTransformDialog}
+                    isOpen={openFilterColumn === col.key}
+                    onToggle={(key) => {
+                      openFilterColumn = openFilterColumn === key ? null : key;
+                    }}
+                  />
+                {/if}
               </div>
               <div
                 class="resize-handle"
@@ -2042,53 +2442,74 @@
                 tabindex="0"
                 on:mousedown={(e) => startResize(col.key, e)}
               ></div>
+            </div>
+          {:else}
+            <div
+              class="table-cell header-cell group-header {item.path ? '' : 'empty-group'}"
+              style={`grid-column: ${item.gridColumn}; grid-row: ${item.gridRow};`}
+              role="columnheader"
+              tabindex="-1"
+              data-group-path={item.path}
+              on:contextmenu={(e) => handleContextMenu(e, { type: 'group', groupKey: item.path })}
+            >
+              {item.label}
             </div>
           {/if}
         {/each}
+        </div>
       </div>
     {:else}
       <!-- 1층 헤더 구조 (flat 데이터) -->
-      <div class="table-row header-row">
-        <div class="table-cell header-cell" style="width: {ROW_NUMBER_WIDTH}px;">#</div>
+      <div class="table-row header-row" style="margin-left: {ROW_NUMBER_WIDTH}px;">
+        <div class="table-cell header-cell" style="position: fixed; width: {ROW_NUMBER_WIDTH}px;">#</div>
         {#each flatColumns as column}
+          {@const columnMeta = displayColumnMeta.get(column.key)}
           <div 
             class="table-cell header-cell {selectedColumns.has(column.key) ? 'selected' : ''} {draggingColumn === column.key ? 'dragging' : ''}" 
             style="width: {getColumnWidth(column.key)}px;"
             data-column-key={column.key}
             role="columnheader"
             tabindex="-1"
-            on:contextmenu={(e) => handleContextMenu(e, { type: 'column', key: column.key })}
+            on:contextmenu={(e) => {
+              if (columnMeta?.kind !== 'scalar') {
+                e.preventDefault();
+                return;
+              }
+              handleContextMenu(e, { type: 'column', key: column.key });
+            }}
             on:mousedown={(e) => handleColumnMouseDown(column.key, e)}
           >
             <div class="header-content">
-              <span
-                class="header-label"
-                role="button"
-                tabindex="0"
-                on:click={(e) => {
-                  handleColumnClick(column.key, e);
-                  if (!e.defaultPrevented) {
-                    handleSort(column.key);
-                  }
-                }}
-                on:keydown={(e) => e.key === 'Enter' && handleSort(column.key)}
-              >
-                {column.label}
+                <span
+                  class="header-label"
+                  role="button"
+                  tabindex="0"
+                  on:click={(e) => {
+                    handleColumnClick(column.key, e);
+                    if (!e.defaultPrevented && columnMeta?.kind === 'scalar') {
+                      handleSort(column.key);
+                    }
+                  }}
+                  on:keydown={(e) => handleHeaderKeydown(e, column.key)}
+                >
+                {getColumnDisplayLabel(column)}
               </span>
               {#if sortColumn === column.key}
                 <span class="sort-indicator material-icons">{sortDirection === 'asc' ? 'arrow_upward' : 'arrow_downward'}</span>
               {/if}
-              <ColumnFilter 
-                {data} 
-                {column} 
-                columnWidth={getColumnWidth(column.key)}
-                onFilter={handleFilter} 
-                onTransform={openTransformDialog}
-                isOpen={openFilterColumn === column.key}
-                onToggle={(key) => {
-                  openFilterColumn = openFilterColumn === key ? null : key;
-                }}
-              />
+              {#if columnMeta?.kind === 'scalar'}
+                <ColumnFilter 
+                  {data} 
+                  {column} 
+                  columnWidth={getColumnWidth(column.key)}
+                  onFilter={handleFilter} 
+                  onTransform={openTransformDialog}
+                  isOpen={openFilterColumn === column.key}
+                  onToggle={(key) => {
+                    openFilterColumn = openFilterColumn === key ? null : key;
+                  }}
+                />
+              {/if}
             </div>
             <div
               class="resize-handle"
@@ -2101,71 +2522,125 @@
       </div>
     {/if}
   </div>
-  <div class="table-body" style="height: {filteredRows.length * ROW_HEIGHT}px;">
-    <!-- 가상 스크롤링: 위쪽 패딩 -->
-    {#if visibleStartIndex > 0}
-      <div class="spacer" style="height: {visibleStartIndex * ROW_HEIGHT}px;"></div>
+  <div class="table-body" style="height: {tableBodyHeight}px;">
+    {#if topSpacerHeight > 0}
+      <div class="spacer" style="height: {topSpacerHeight}px;"></div>
     {/if}
-    <!-- 실제 렌더링되는 행들 -->
-    {#each visibleRows as row (row.id)}
+    {#each visibleRows as row, index (row.id)}
+      {@const rowIndex = visibleStartIndex + index}
+      {@const slotCount = rowDisplaySlotCount.get(row.id) ?? 1}
+      {@const rowBlockHeight = rowHeights[rowIndex] ?? slotCount * rowHeight}
       {@const originalIndex = originalRowIndexMap.get(row.id) ?? -1}
-      <div class="table-row">
-        <div 
-          class="table-cell row-number" 
+      <div class="table-row" style="height: {rowBlockHeight}px;">
+        <div
+          class="table-cell row-number merged"
           style="width: {ROW_NUMBER_WIDTH}px;"
           role="rowheader"
           tabindex="-1"
           on:contextmenu={(e) => handleContextMenu(e, { type: 'row', rowId: row.id })}
-          title={originalIndex >= 0 ? `원본 행 번호: ${originalIndex + 1}` : ''}
         >
-          {originalIndex >= 0 ? originalIndex + 1 : '-'}
+          <div class="row-number-content">
+            {originalIndex >= 0 ? originalIndex + 1 : '-'}
+          </div>
         </div>
-        {#each flatColumns as column}
-          {@const cell = row.cells[column.key]}
+        {#each flatColumns as column (column.key)}
+          {@const columnMeta = displayColumnMeta.get(column.key)}
+          {@const isScalarColumn = !columnMeta || columnMeta.kind === 'scalar'}
+          {@const baseColumnKey = columnMeta?.baseColumnKey ?? column.key}
+          {@const cell = row.cells[baseColumnKey]}
           {@const cellValue = cell?.value}
-          {@const isImage = isImageUrl(cellValue)}
-          {@const isEditing = editingCell?.rowId === row.id && editingCell?.columnKey === column.key}
-          <div 
-            class="table-cell cell-wrapper" 
-            style="width: {getColumnWidth(column.key)}px;"
+          {@const isImage = isScalarColumn && isImageUrl(cellValue)}
+          {@const isEditing = isScalarColumn && editingCell?.rowId === row.id && editingCell?.columnKey === column.key}
+          <div
+            class="table-cell cell-wrapper {isScalarColumn ? '' : 'array-wrapper'}"
+            style="width: {getColumnWidth(column.key)}px; height: {rowBlockHeight}px;"
             role="cell"
-            tabindex="-1"
+            tabindex="0"
             data-row-id={row.id}
             data-column-key={column.key}
-            on:click={(e) => handleCellClick(row.id, column.key, e)}
+            on:click={(e) => {
+              if (isScalarColumn) {
+                handleCellClick(row.id, column.key, e);
+              } else {
+                e.stopPropagation();
+              }
+            }}
+            on:keydown={(e) => isScalarColumn && handleCellKeyActivation(e, row.id, column.key)}
             on:contextmenu={(e) => handleContextMenu(e, { type: 'cell', rowId: row.id, key: column.key })}
           >
-            {#if isEditing}
-              <input
-                type="text"
-                class="cell-input editing"
-                class:has-image={isImage}
-                bind:value={editingValue}
-                on:keydown={(e) => handleCellKeydown(e, row.id, column.key)}
-                on:blur={commitCellEdit}
-                autofocus
-              />
+            {#if isScalarColumn}
+              {#if isEditing}
+                <!-- svelte-ignore a11y-autofocus -->
+                <input
+                  type="text"
+                  class="cell-input editing"
+                  class:has-image={isImage}
+                  bind:value={editingValue}
+                  on:keydown={(e) => handleCellKeydown(e, row.id, column.key)}
+                  on:blur={commitCellEdit}
+                  autofocus
+                />
+              {:else}
+                <div class="cell-display" class:has-image={isImage}>
+                  {formatCellValue(cellValue)}
+                </div>
+                {#if isImage}
+                  <button
+                    class="image-icon-btn"
+                    on:click|stopPropagation={() => openImageViewer(String(cellValue))}
+                    title="이미지 보기"
+                  >
+                    <span class="material-icons">image</span>
+                  </button>
+                {/if}
+              {/if}
             {:else}
-              <div class="cell-display" class:has-image={isImage}>
-                {formatCellValue(cellValue)}
+              {@const parentKey = columnMeta?.parentKey}
+              {@const arrayInfo = parentKey ? getArrayDisplayData(row, parentKey) : null}
+              {@const displayCount = arrayInfo ? Math.max(arrayInfo.displayCount, 1) : slotCount}
+              {@const dataCount = arrayInfo ? arrayInfo.items.length : 0}
+              {@const hasMore = !!(arrayInfo && arrayInfo.showMore && parentKey)}
+              {@const fillerRows = Math.max(displayCount - dataCount - (hasMore ? 1 : 0), 0)}
+              {@const trailingPlaceholders = Math.max(slotCount - displayCount, 0)}
+              <div class="cell-array" style={`grid-template-rows: repeat(${slotCount}, ${rowHeight}px);`}>
+                {#if arrayInfo}
+                  {#each arrayInfo.items as entry}
+                    <div class="cell-array-row">
+                      {formatNestedArrayValue(getArrayEntryFieldValue(entry, columnMeta?.fieldPath))}
+                    </div>
+                  {/each}
+                  {#if hasMore && parentKey}
+                    <button
+                      class="cell-array-more"
+                      on:click|stopPropagation={() => toggleChildArrayExpansion(row.id, parentKey)}
+                    >
+                      <span class="material-icons">
+                        {expandedChildArrays.has(getChildArrayKey(row.id, parentKey)) ? 'expand_less' : 'more_horiz'}
+                      </span>
+                      {#if !expandedChildArrays.has(getChildArrayKey(row.id, parentKey))}
+                        <span class="more-label">+{arrayInfo.totalCount - arrayInfo.items.length}</span>
+                      {/if}
+                    </button>
+                  {/if}
+                  {#each Array.from({ length: fillerRows }) as _}
+                    <div class="cell-array-row placeholder"></div>
+                  {/each}
+                  {#each Array.from({ length: trailingPlaceholders }) as _}
+                    <div class="cell-array-row placeholder"></div>
+                  {/each}
+                {:else}
+                  {#each Array.from({ length: slotCount }) as _}
+                    <div class="cell-array-row placeholder"></div>
+                  {/each}
+                {/if}
               </div>
-            {/if}
-            {#if isImage && !isEditing}
-              <button
-                class="image-icon-btn"
-                on:click|stopPropagation={() => openImageViewer(String(cellValue))}
-                title="이미지 보기"
-              >
-                <span class="material-icons">image</span>
-              </button>
             {/if}
           </div>
         {/each}
       </div>
     {/each}
-    <!-- 가상 스크롤링: 아래쪽 패딩 -->
-    {#if visibleEndIndex < filteredRows.length}
-      <div class="spacer" style="height: {(filteredRows.length - visibleEndIndex) * ROW_HEIGHT}px;"></div>
+    {#if bottomSpacerHeight > 0}
+      <div class="spacer" style="height: {bottomSpacerHeight}px;"></div>
     {/if}
   </div>
   
@@ -2212,8 +2687,7 @@
     position: sticky;
     top: 0;
     z-index: 1010;
-    background: var(--bg-primary);
-    border-bottom: 1px solid var(--border);
+    background: var(--bg-secondary);
     width: fit-content;
     min-width: 100%;
   }
@@ -2228,10 +2702,10 @@
   .table-row {
     display: flex;
     min-height: 32px;
-    height: 32px;
     border-bottom: 1px solid var(--border);
     width: 100%;
     box-sizing: border-box;
+    align-items: stretch;
   }
 
   .table-row.header-row {
@@ -2243,6 +2717,12 @@
     font-size: 0.8125rem;
   }
 
+
+  .header-grid-wrapper {
+    width: fit-content;
+    max-width: 100%;
+    overflow-y: auto;
+  }
 
   .header-grid {
     display: grid;
@@ -2425,6 +2905,21 @@
     position: sticky;
     left: 0;
     z-index: 1005;
+    display: flex;
+    align-items: center;
+  }
+
+  .row-number.merged {
+    padding: 0;
+    align-items: stretch;
+  }
+
+  .row-number-content {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    height: 100%;
   }
 
   .row-number-header {
@@ -2435,10 +2930,15 @@
 
   .cell-wrapper {
     display: flex;
-    align-items: center;
+    align-items: stretch;
     gap: 0.25rem;
     position: relative;
     cursor: cell;
+    height: 100%;
+  }
+
+  .array-wrapper {
+    padding: 0;
   }
 
   .cell-display {
@@ -2450,11 +2950,66 @@
     text-overflow: ellipsis;
     white-space: nowrap;
     overflow: hidden;
+    display: flex;
+    align-items: center;
   }
 
   .cell-display.has-image {
     padding-right: 1.75rem;
   }
+
+  .cell-array {
+    display: grid;
+    width: 100%;
+    height: 100%;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 4px;
+    overflow: hidden;
+  }
+
+  .cell-array-row {
+    display: flex;
+    align-items: center;
+    padding: 0.25rem 0.5rem;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+    font-size: 0.8125rem;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
+  .cell-array-row:last-child {
+    border-bottom: none;
+  }
+
+  .cell-array-row.placeholder {
+    opacity: 0.2;
+  }
+
+  .cell-array-more {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.25rem;
+    min-height: 32px;
+    border: none;
+    background: transparent;
+    color: var(--text-secondary);
+    cursor: pointer;
+    font-size: 0.75rem;
+  }
+
+  .cell-array-more .material-icons {
+    font-size: 18px;
+  }
+
+  .cell-array-more .more-label {
+    font-size: 0.75rem;
+  }
+
+  .cell-array-more:hover {
+    color: var(--accent);
+  }
+
 
   .cell-input {
     flex: 1;

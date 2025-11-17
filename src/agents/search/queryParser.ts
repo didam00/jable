@@ -3,26 +3,42 @@
  * 특수 검색 문법 지원
  */
 
+export type RowSelection =
+  | { kind: 'single'; index: number }
+  | { kind: 'range'; start: number; end: number }
+  | { kind: 'list'; indices: number[] };
+
+export type ColumnSelection =
+  | { kind: 'single'; value: string | number }
+  | { kind: 'range'; start: number; end: number }
+  | { kind: 'list'; values: Array<string | number> };
+
+export type NumericComparison = {
+  column: string;
+  operator: '>' | '>=' | '<' | '<=' | '=' | '!=';
+  value: number;
+  isNumeric: true;
+};
+
+export type StringComparison = {
+  column: string;
+  operator: '>' | '>=' | '<' | '<=' | '=' | '!=' | '!>';
+  value: string;
+  isNumeric: false;
+};
+
 export interface ParsedQuery {
-  type: 'normal' | 'column' | 'comparison' | 'stringComparison' | 'row' | 'rowRange' | 'rowList' | 'cell' | 'cellRange' | 'cellList' | 'columnFilter';
+  type: 'normal' | 'column' | 'columnPresence' | 'comparison' | 'stringComparison' | 'row' | 'rowRange' | 'rowList' | 'cell' | 'cellRange' | 'cellList' | 'columnFilter' | 'rowColumn';
   // normal 검색
   text?: string;
   // column=key 검색
   columnName?: string;
+  // column= (missing) / column!= (exists)
+  presenceCheck?: 'missing' | 'exists';
   // column>number, column>=number 등 (숫자 비교)
-  comparisons?: Array<{
-    column: string;
-    operator: '>' | '>=' | '<' | '<=' | '=' | '!=';
-    value: number;
-    isNumeric: true;
-  }>;
+  comparisons?: NumericComparison[];
   // column>str 등 (문자열 포함)
-  stringComparisons?: Array<{
-    column: string;
-    operator: '>' | '>=' | '<' | '<=' | '=' | '!=';
-    value: string;
-    isNumeric: false;
-  }>;
+  stringComparisons?: StringComparison[];
   // AND/OR 연산자
   logicalOperator?: '&' | '|';
   // :number 행 필터링
@@ -40,6 +56,9 @@ export interface ParsedQuery {
   cellEndColumn?: number;
   // :a:b,c,d 셀 리스트
   cellColumns?: Array<string | number>;
+  // 행+열 복합 필터링
+  rowSelection?: RowSelection;
+  columnSelection?: ColumnSelection;
   // ::b 열 필터링 (단일)
   filterColumn?: string | number;
   // ::b-c 열 범위 필터링
@@ -130,38 +149,64 @@ export function parseQuery(query: string): ParsedQuery {
     } else if (parts.length === 2) {
       const rowSpec = parts[0].trim();
       const colSpec = parts[1].trim();
-      const rowIndex = parseInt(rowSpec, 10);
+      const rowSelection = parseRowSelection(rowSpec);
+      const columnSelection = parseColumnSelection(colSpec);
       
-      if (!isNaN(rowIndex)) {
-        // :a:b-c 형식 (행:열범위)
-        const rangeMatch = colSpec.match(/^(\d+)-(\d+)$/);
-        if (rangeMatch) {
+      if (rowSelection && columnSelection) {
+        if (rowSelection.kind === 'single') {
+          const rowIndex = rowSelection.index;
+          // :a:b-c 형식 (행:열범위)
+          if (columnSelection.kind === 'range') {
+            return {
+              type: 'cellRange',
+              cellRow: rowIndex,
+              cellStartColumn: columnSelection.start,
+              cellEndColumn: columnSelection.end,
+            };
+          }
+          
+          if (columnSelection.kind === 'list') {
+            return {
+              type: 'cellList',
+              cellRow: rowIndex,
+              cellColumns: columnSelection.values,
+            };
+          }
+          
           return {
-            type: 'cellRange',
-            cellRow: rowIndex - 1, // 0-based
-            cellStartColumn: parseInt(rangeMatch[1], 10) - 1,
-            cellEndColumn: parseInt(rangeMatch[2], 10) - 1,
+            type: 'cell',
+            cellRow: rowIndex,
+            cellColumn: columnSelection.value,
           };
         }
         
-        // :a:b,c,d 형식 (행:열리스트)
-        if (colSpec.includes(',')) {
-          const columns = colSpec.split(',').map(c => c.trim()).map(c => parseColumnSpec(c));
-          return {
-            type: 'cellList',
-            cellRow: rowIndex - 1, // 0-based
-            cellColumns: columns,
-          };
-        }
-        
-        // :a:b 형식 (행:열)
         return {
-          type: 'cell',
-          cellRow: rowIndex - 1, // 0-based
-          cellColumn: parseColumnSpec(colSpec),
+          type: 'rowColumn',
+          rowSelection,
+          columnSelection,
         };
       }
     }
+  }
+
+  // column= (missing 값)
+  const missingMatch = trimmed.match(/^([a-zA-Z_][a-zA-Z0-9_.]*)\s*=\s*$/);
+  if (missingMatch) {
+    return {
+      type: 'columnPresence',
+      columnName: missingMatch[1],
+      presenceCheck: 'missing',
+    };
+  }
+
+  // column!= (존재 여부)
+  const existsMatch = trimmed.match(/^([a-zA-Z_][a-zA-Z0-9_.]*)\s*!=\s*$/);
+  if (existsMatch) {
+    return {
+      type: 'columnPresence',
+      columnName: existsMatch[1],
+      presenceCheck: 'exists',
+    };
   }
 
   // column=value 형식 (정확한 일치) - 먼저 처리
@@ -182,8 +227,8 @@ export function parseQuery(query: string): ParsedQuery {
   if (hasAnd || hasOr) {
     const separator = hasAnd ? '&' : '|';
     const parts = trimmed.split(separator);
-    const numericComparisons: ParsedQuery['comparisons'] = [];
-    const stringComparisons: ParsedQuery['stringComparisons'] = [];
+    const numericComparisons: NumericComparison[] = [];
+    const stringComparisons: StringComparison[] = [];
     
     for (const part of parts) {
       const comp = parseComparison(part.trim());
@@ -192,14 +237,14 @@ export function parseQuery(query: string): ParsedQuery {
           numericComparisons.push({
             column: comp.column,
             operator: comp.operator,
-            value: comp.value as number,
+            value: comp.value,
             isNumeric: true,
           });
         } else {
           stringComparisons.push({
             column: comp.column,
             operator: comp.operator,
-            value: comp.value as string,
+            value: comp.value,
             isNumeric: false,
           });
         }
@@ -240,7 +285,7 @@ export function parseQuery(query: string): ParsedQuery {
           comparisons: [{
             column: comp.column,
             operator: comp.operator,
-            value: comp.value as number,
+            value: comp.value,
             isNumeric: true,
           }],
         };
@@ -250,7 +295,7 @@ export function parseQuery(query: string): ParsedQuery {
           stringComparisons: [{
             column: comp.column,
             operator: comp.operator,
-            value: comp.value as string,
+            value: comp.value,
             isNumeric: false,
           }],
         };
@@ -265,10 +310,11 @@ export function parseQuery(query: string): ParsedQuery {
   };
 }
 
-function parseComparison(str: string): { column: string; operator: '>' | '>=' | '<' | '<=' | '!=' | '='; value: number | string; isNumeric: boolean } | null {
+function parseComparison(str: string): NumericComparison | StringComparison | null {
   // column>number, column>=number, column<number, column<=number, column!=number, column>str
   // = 연산자는 숫자 비교가 아니므로 제외 (column=str은 이미 위에서 처리됨)
   const patterns = [
+    { regex: /^([a-zA-Z_][a-zA-Z0-9_.]*)\s*!>\s*(.+)$/, operator: '!>' as const },
     { regex: /^([a-zA-Z_][a-zA-Z0-9_.]*)\s*>=\s*(.+)$/, operator: '>=' as const },
     { regex: /^([a-zA-Z_][a-zA-Z0-9_.]*)\s*<=\s*(.+)$/, operator: '<=' as const },
     { regex: /^([a-zA-Z_][a-zA-Z0-9_.]*)\s*!=\s*(.+)$/, operator: '!=' as const },
@@ -283,6 +329,15 @@ function parseComparison(str: string): { column: string; operator: '>' | '>=' | 
       const valueStr = match[2].trim();
       const numValue = parseFloat(valueStr);
       
+      if (pattern.operator === '!>') {
+        return {
+          column,
+          operator: pattern.operator,
+          value: valueStr,
+          isNumeric: false,
+        };
+      }
+      
       // 숫자로 파싱 가능하면 숫자 비교, 아니면 문자열 포함 검색
       if (!isNaN(numValue) && valueStr === numValue.toString()) {
         return {
@@ -291,15 +346,15 @@ function parseComparison(str: string): { column: string; operator: '>' | '>=' | 
           value: numValue,
           isNumeric: true,
         };
-      } else {
-        // 문자열 포함 검색 (>, >=, <, <=, !=)
-        return {
-          column,
-          operator: pattern.operator,
-          value: valueStr,
-          isNumeric: false,
-        };
       }
+      
+      // 문자열 포함 검색 (>, >=, <, <=, !=)
+      return {
+        column,
+        operator: pattern.operator,
+        value: valueStr,
+        isNumeric: false,
+      };
     }
   }
 
@@ -310,5 +365,60 @@ function parseColumnSpec(spec: string): string | number {
   // 숫자면 인덱스로, 아니면 열 이름으로
   const num = parseInt(spec, 10);
   return isNaN(num) ? spec : num - 1; // 0-based
+}
+
+function parseRowSelection(rowSpec: string): RowSelection | null {
+  const trimmed = rowSpec.trim();
+  
+  // 리스트
+  if (trimmed.includes(',')) {
+    const indices = trimmed
+      .split(',')
+      .map(value => parseInt(value.trim(), 10) - 1)
+      .filter(index => !isNaN(index) && index >= 0);
+    if (indices.length > 0) {
+      return { kind: 'list', indices };
+    }
+  }
+  
+  // 범위
+  const rangeMatch = trimmed.match(/^(\d+)-(\d+)$/);
+  if (rangeMatch) {
+    return {
+      kind: 'range',
+      start: parseInt(rangeMatch[1], 10) - 1,
+      end: parseInt(rangeMatch[2], 10) - 1,
+    };
+  }
+  
+  const rowIndex = parseInt(trimmed, 10);
+  if (!isNaN(rowIndex)) {
+    return { kind: 'single', index: rowIndex - 1 };
+  }
+  
+  return null;
+}
+
+function parseColumnSelection(colSpec: string): ColumnSelection | null {
+  const trimmed = colSpec.trim();
+  
+  if (trimmed.includes(',')) {
+    const values = trimmed
+      .split(',')
+      .map(value => parseColumnSpec(value.trim()));
+    return { kind: 'list', values };
+  }
+  
+  const rangeMatch = trimmed.match(/^(\d+)-(\d+)$/);
+  if (rangeMatch) {
+    return {
+      kind: 'range',
+      start: parseInt(rangeMatch[1], 10) - 1,
+      end: parseInt(rangeMatch[2], 10) - 1,
+    };
+  }
+  
+  const singleValue = parseColumnSpec(trimmed);
+  return { kind: 'single', value: singleValue };
 }
 
