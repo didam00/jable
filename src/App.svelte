@@ -17,6 +17,7 @@
   import type { TableData } from './agents/store';
   import type { Tab } from './types/tab';
   import { isTauri } from './utils/isTauri';
+  import { getRecentFiles, addRecentFile, removeRecentFile, type RecentFile } from './utils/recentFiles';
   import logo from './assets/logo.png';
 
   let tabs: Tab[] = [];
@@ -47,6 +48,7 @@
   let searchFilteredColumnKeys: string[] | null = null;
   let showSettings = false;
   const isTauriApp = isTauri();
+  let recentFiles: RecentFile[] = [];
   type RawViewComponentType = typeof import('./components/RawView.svelte').default;
   let RawViewComponent: RawViewComponentType | null = null;
   let rawViewLoadPromise: Promise<void> | null = null;
@@ -189,6 +191,57 @@
   }
 
   onMount(() => {
+    let fileDropUnlisten: (() => void) | null = null;
+    
+    // 최근 파일 목록 로드 (Tauri 환경에서만)
+    if (isTauriApp) {
+      recentFiles = getRecentFiles();
+      
+      // Tauri 파일 드롭 이벤트 리스너 설정
+      (async () => {
+        try {
+          const { getCurrentWebview } = await import('@tauri-apps/api/webview');
+          const webview = getCurrentWebview();
+          
+          // Tauri 2.x의 onDragDropEvent 사용
+          fileDropUnlisten = await webview.onDragDropEvent((event) => {
+            console.log('[onDragDropEvent] Tauri 파일 드롭 이벤트:', event);
+            
+            if (event.payload.type === 'over') {
+              // 파일이 창 위에 호버 중
+              console.log('[onDragDropEvent] 파일 호버 중:', event.payload.position);
+              isDragging = true;
+            } else if (event.payload.type === 'drop') {
+              // 파일 드롭됨
+              const paths = event.payload.paths as string[];
+              console.log('[onDragDropEvent] 파일 드롭됨:', paths);
+              
+              isDragging = false;
+              
+              if (paths && Array.isArray(paths)) {
+                // 각 파일 경로를 처리
+                for (const filePath of paths) {
+                  const fileName = filePath.split(/[/\\]/).pop() || 'untitled';
+                  const lowerName = fileName.toLowerCase();
+                  
+                  // 지원하는 파일 형식만 처리
+                  if (lowerName.endsWith('.json') || lowerName.endsWith('.csv') || lowerName.endsWith('.xml') || lowerName.endsWith('.toon')) {
+                    handleFileDrop({ path: filePath, name: fileName });
+                  }
+                }
+              }
+            } else {
+              // 파일 드롭 취소됨
+              console.log('[onDragDropEvent] 파일 드롭 취소됨');
+              isDragging = false;
+            }
+          });
+        } catch (error) {
+          console.error('[onMount] Tauri 파일 드롭 이벤트 설정 실패:', error);
+        }
+      })();
+    }
+    
     dataStore.subscribe((value) => {
       if (!isUpdatingFromTab && activeTabId) {
         // dataStore 변경 시 현재 활성 탭 업데이트
@@ -231,7 +284,12 @@
       },
     });
 
-    return cleanup;
+    return () => {
+      cleanup();
+      if (fileDropUnlisten) {
+        fileDropUnlisten();
+      }
+    };
   });
 
   function createNewTab(
@@ -473,6 +531,12 @@
       
       await integrateImportedData({ file, data: result.data, format: result.format });
       
+      // Tauri 환경에서 파일 경로가 있으면 최근 파일 목록에 추가
+      if (isTauriApp && 'path' in file && file.path) {
+        addRecentFile(file.path, file.name);
+        recentFiles = getRecentFiles(); // reactive 업데이트
+      }
+      
       showProgress = false;
     } catch (error) {
       showProgress = false;
@@ -554,6 +618,11 @@
         const fileName = result.filePath.split(/[/\\]/).pop() || tab.name;
         tab.name = fileName;
         tabs = tabs; // Svelte reactivity
+        // 최근 파일 목록에 추가
+        if (isTauriApp) {
+          addRecentFile(result.filePath, fileName);
+          recentFiles = getRecentFiles();
+        }
       }
     } catch (error) {
       alert(`저장 실패: ${error instanceof Error ? error.message : 'Unknown error'}`);
@@ -726,6 +795,44 @@
       <div class="empty-state">
         <img src={logo} alt="Jable" class="logo" />
         <p>파일을 업로드하거나 데이터를 붙여넣어 시작하세요</p>
+        {#if isTauriApp && recentFiles.length > 0}
+          <div class="recent-files">
+            <h3>최근 파일</h3>
+            <div class="recent-files-list">
+              {#each recentFiles as file (file.path)}
+                <div class="recent-file-item">
+                  <button
+                    class="recent-file-button"
+                    on:click={async () => {
+                      try {
+                        await handleFileDrop({ path: file.path, name: file.name });
+                      } catch (error) {
+                        console.error('[recentFileClick] 파일 열기 실패:', error);
+                        alert(`파일을 열 수 없습니다: ${error instanceof Error ? error.message : 'Unknown error'}`);
+                      }
+                    }}
+                    title={file.path}
+                  >
+                    <span class="material-icons">description</span>
+                    <span class="file-name">{file.name}</span>
+                    <span class="file-path">{file.path}</span>
+                  </button>
+                  <button
+                    class="recent-file-remove"
+                    on:click|stopPropagation={(e) => {
+                      e.stopPropagation();
+                      removeRecentFile(file.path);
+                      recentFiles = getRecentFiles();
+                    }}
+                    title="최근 파일 목록에서 제거"
+                  >
+                    <span class="material-icons">close</span>
+                  </button>
+                </div>
+              {/each}
+            </div>
+          </div>
+        {/if}
       </div>
     {:else}
       <div class="stats-controls-container">
@@ -905,6 +1012,111 @@
   .empty-state p {
     font-size: 0.875rem;
     margin-top: -0.25rem;
+  }
+
+  .recent-files {
+    margin-top: 2rem;
+    width: 100%;
+    max-width: 600px;
+  }
+
+  .recent-files h3 {
+    font-size: 1rem;
+    font-weight: 600;
+    color: var(--text-primary);
+    margin: 0 0 1rem 0;
+    text-align: left;
+  }
+
+  .recent-files-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+
+  .recent-file-item {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    border: 1px solid var(--border);
+    background: var(--bg-secondary);
+    border-radius: 8px;
+    transition: all 0.2s;
+    width: 100%;
+    overflow: hidden;
+  }
+
+  .recent-file-item:hover:not(:has(.recent-file-remove:hover)) {
+    background: var(--bg-tertiary);
+    /* border-color: var(--text-secondary); */
+  }
+
+  .recent-file-button {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.75rem 1rem;
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    text-align: left;
+    flex: 1;
+    min-width: 0;
+    transition: all 0.2s;
+  }
+
+  .recent-file-button:hover {
+    background: transparent;
+  }
+
+  .recent-file-button .material-icons {
+    font-size: 20px;
+    color: var(--text-secondary);
+    flex-shrink: 0;
+  }
+
+  .recent-file-button .file-name {
+    font-weight: 500;
+    color: var(--text-primary);
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .recent-file-button .file-path {
+    font-size: 0.8125rem;
+    color: var(--text-secondary);
+    flex: 2;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .recent-file-remove {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0.5rem;
+    margin-right: 0.5rem;
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    border-radius: 16px;
+    transition: all 0.2s;
+    flex-shrink: 0;
+    color: var(--border);
+  }
+
+  .recent-file-remove:hover {
+    /* background: var(--bg-tertiary); */
+    color: var(--text-secondary);
+  }
+
+  .recent-file-remove .material-icons {
+    font-size: 18px;
   }
 
   .stats-controls-container {

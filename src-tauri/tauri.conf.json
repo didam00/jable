@@ -1,6 +1,6 @@
 {
   "productName": "JSON Table Editor",
-  "version": "0.1.0",
+  "version": "0.1.4",
   "identifier": "com.jsontableeditor.app",
   "build": {
     "beforeDevCommand": "pnpm dev:tauri",
@@ -19,7 +19,8 @@
         "minHeight": 600,
         "resizable": true,
         "decorations": false,
-        "fullscreen": false
+        "fullscreen": false,
+        "dragDropEnabled": true
       }
     ],
     "security": {

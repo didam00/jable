@@ -58,24 +58,44 @@
   }
 
   function getEffectiveRows(): Row[] {
+    console.log('[ColumnTransformDialog] getEffectiveRows 호출');
+    console.log('  - targetFilteredResultEmpty:', targetFilteredResultEmpty);
+    console.log('  - targetIsFiltered:', targetIsFiltered);
+    console.log('  - targetRows:', targetRows);
+    console.log('  - targetRows.length:', targetRows?.length);
+    console.log('  - data?.rows?.length:', data?.rows?.length);
+    
     // targetFilteredResultEmpty가 true면 필터링 결과가 비어있음
     if (targetFilteredResultEmpty) {
+      console.log('  -> targetFilteredResultEmpty가 true, 빈 배열 반환');
       return [];
     }
     
-    // targetRows가 있고 길이가 0보다 크면 사용 (필터링된 행)
+    // 필터링이 적용되지 않은 경우 (targetIsFiltered가 false) 무조건 전체 행 사용
+    if (!targetIsFiltered) {
+      const allRows = data?.rows ?? [];
+      console.log('  -> 필터링 없음, 전체 행 반환:', allRows.length);
+      return allRows;
+    }
+    
+    // 필터링이 적용된 경우 (targetIsFiltered가 true)
+    // targetRows가 있고 길이가 0보다 크면 사용
     if (targetRows && Array.isArray(targetRows) && targetRows.length > 0) {
+      console.log('  -> 필터링된 행 사용:', targetRows.length);
       return targetRows;
     }
     
-    // targetIsFiltered가 true이고 targetRows가 명시적으로 빈 배열이면 빈 배열 반환
-    // (필터링이 적용되었지만 결과가 없는 경우)
-    if (targetIsFiltered && targetRows && Array.isArray(targetRows) && targetRows.length === 0) {
+    // 필터링이 적용되었지만 targetRows가 빈 배열이면 빈 배열 반환
+    // (필터링 결과가 없는 경우)
+    if (targetRows && Array.isArray(targetRows) && targetRows.length === 0) {
+      console.log('  -> 필터링 결과 없음, 빈 배열 반환');
       return [];
     }
     
-    // 그 외의 경우: 전체 행 반환 (필터링이 없거나 targetRows가 전달되지 않은 경우)
-    return data?.rows ?? [];
+    // 예외 상황: targetIsFiltered가 true인데 targetRows가 없으면 전체 행 사용
+    const fallbackRows = data?.rows ?? [];
+    console.log('  -> 예외 상황, 전체 행 반환:', fallbackRows.length);
+    return fallbackRows;
   }
 
   function syncPreviewRowIndex(index: number) {
@@ -123,8 +143,18 @@
     transformMode = 'single';
   }
 
+  // 모든 관련 prop이 변경될 때 재계산되도록 명시적 의존성 설정
   $: {
+    // 의존성 명시를 위해 변수들을 참조 (Svelte가 자동으로 의존성 추적)
+    void targetRows; void targetIsFiltered; void targetFilteredResultEmpty; void data;
+    console.log('[ColumnTransformDialog] reactive statement 실행');
+    console.log('  - show:', show);
+    console.log('  - targetRows prop:', targetRows);
+    console.log('  - targetIsFiltered prop:', targetIsFiltered);
+    console.log('  - targetFilteredResultEmpty prop:', targetFilteredResultEmpty);
+    console.log('  - data?.rows?.length:', data?.rows?.length);
     effectiveTargetRows = getEffectiveRows();
+    console.log('  - effectiveTargetRows.length:', effectiveTargetRows.length);
     syncPreviewRowIndex(previewRowIndex);
   }
 

@@ -67,6 +67,7 @@ let dragAnimationFrame: number | null = null;
 let draggingColumnParentKey = '';
 let editingCell: { rowId: string; columnKey: string } | null = null;
 let editingValue: string = '';
+let isCommittingFromEnter = false;
 let maxVisibleRows = 50;
 let bufferRows = 25;
 let renderRowLimit = -1;
@@ -957,6 +958,7 @@ function handleSort(columnKey: string) {
   // 정렬 변경 시 필터 상태 캐시 리셋
   lastFilterState = '';
   updateStateAndDispatch();
+  forceVisibleRowsRefresh();
 }
 
 export function clearSort() {
@@ -965,6 +967,7 @@ export function clearSort() {
   // 정렬 변경 시 필터 상태 캐시 리셋
   lastFilterState = '';
   updateStateAndDispatch();
+  forceVisibleRowsRefresh();
 }
 
 function handleFilter(columnKey: string, value: string) {
@@ -993,6 +996,33 @@ export function clearFilter(columnKey?: string) {
   // Map 변경을 reactivity에 알리기 위해 새 참조 생성
   activeFilters = new Map(activeFilters);
   updateStateAndDispatch();
+}
+
+export function refresh() {
+  // 현재 데이터 다시 로드
+  const currentData = dataStore.getCurrentData();
+  if (currentData) {
+    data = currentData;
+  }
+  
+  // 모든 상태 초기화
+  expandedChildArrays = new Set();
+  arrayDisplayCache.clear();
+  lastFilteredRowsRef = null;
+  lastFilterState = '';
+  
+  // 컬럼 너비 초기화
+  initializeColumnWidths();
+  
+  // 컬럼 메타데이터 및 디스플레이 구조 재구성
+  buildColumnMetadata();
+  recomputeDisplayStructures();
+  
+  // 상태 업데이트 및 디스패치
+  updateStateAndDispatch();
+  
+  // 가시 행 강제 업데이트
+  forceVisibleRowsRefresh();
 }
 
 function handleScroll(event: Event) {
@@ -1411,16 +1441,16 @@ export function navigateToCell(rowId: string, columnKey: string) {
     });
   }
 
-export function navigateToRow(rowId: string) {
-  const rowIndex = filteredRows.findIndex((row) => row.id === rowId);
-  if (rowIndex === -1) {
-    return;
-  }
+  export function navigateToRow(rowId: string) {
+    const rowIndex = filteredRows.findIndex((row) => row.id === rowId);
+    if (rowIndex === -1) {
+      return;
+    }
 
-  if (tableContainer) {
-    const targetScrollTop = Math.max(0, getRowOffsetByIndex(rowIndex) - rowHeight);
-    tableContainer.scrollTop = targetScrollTop;
-  }
+    if (tableContainer) {
+      const targetScrollTop = Math.max(0, getRowOffsetByIndex(rowIndex) - rowHeight);
+      tableContainer.scrollTop = targetScrollTop;
+    }
   }
 
   function startCellEdit(rowId: string, columnKey: string) {
@@ -1438,6 +1468,8 @@ export function navigateToRow(rowId: string) {
   
   function commitCellEdit() {
     if (!editingCell) return;
+    
+    // Enter 키로 인한 commit이면 플래그는 유지 (blur에서 중복 호출 방지)
     
     const { rowId, columnKey } = editingCell;
     const finalValue = editingValue === '' || editingValue === null || editingValue === undefined ? null : editingValue;
@@ -1516,15 +1548,20 @@ export function navigateToRow(rowId: string) {
   function handleCellKeydown(event: KeyboardEvent, rowId: string, columnKey: string) {
     if (event.key === 'Enter') {
       event.preventDefault();
-      const previousEditingCell = editingCell;
-      commitCellEdit();
+      event.stopPropagation();
       
+      const previousEditingCell = editingCell;
       if (!previousEditingCell) {
         return;
       }
       
+      // Enter 키로 인한 commit임을 표시 (blur 이벤트에서 중복 호출 방지)
+      isCommittingFromEnter = true;
+      commitCellEdit();
+      
       const currentRowIndex = filteredRows.findIndex(r => r.id === rowId);
       if (currentRowIndex === -1) {
+        isCommittingFromEnter = false;
         return;
       }
 
@@ -1532,10 +1569,13 @@ export function navigateToRow(rowId: string) {
       const targetRow = filteredRows[targetRowIndex];
 
       if (targetRow) {
-        setTimeout(() => {
+        // commitCellEdit이 완료되고 editingCell이 null로 설정된 후에 다음 편집 시작
+        requestAnimationFrame(() => {
+          isCommittingFromEnter = false;
           startCellEdit(targetRow.id, columnKey);
-          // handleCellClick(targetRow.id, columnKey, event);
-        }, 0);
+        });
+      } else {
+        isCommittingFromEnter = false;
       }
     } else if (event.key === 'Tab') {
       event.preventDefault();
@@ -1566,12 +1606,12 @@ export function navigateToRow(rowId: string) {
     }
   }
 
-function formatCellValue(cell: any): string {
-  // null 값은 빈 문자열로 표시 (결측값)
-  if (cell === null || cell === undefined) return '';
-  if (typeof cell === 'object') return JSON.stringify(cell);
-  return String(cell);
-}
+  function formatCellValue(cell: any): string {
+    // null 값은 빈 문자열로 표시 (결측값)
+    if (cell === null || cell === undefined) return '';
+    if (typeof cell === 'object') return JSON.stringify(cell);
+    return String(cell);
+  }
 
 function formatNestedArrayValue(value: any): string {
   if (value === null || value === undefined) {
@@ -2917,7 +2957,12 @@ $: if (data && displayColumns) {
                   class:has-image={isImage}
                   bind:value={editingValue}
                   on:keydown={(e) => handleCellKeydown(e, row.id, column.key)}
-                  on:blur={commitCellEdit}
+                  on:blur={() => {
+                    // Enter 키로 인한 commit이 아닐 때만 blur에서 commit
+                    if (!isCommittingFromEnter) {
+                      commitCellEdit();
+                    }
+                  }}
                   autofocus
                 />
               {:else}
