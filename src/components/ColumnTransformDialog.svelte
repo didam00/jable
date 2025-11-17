@@ -58,15 +58,23 @@
   }
 
   function getEffectiveRows(): Row[] {
+    // targetFilteredResultEmpty가 true면 필터링 결과가 비어있음
     if (targetFilteredResultEmpty) {
       return [];
     }
-    if (targetRows && targetRows.length > 0) {
+    
+    // targetRows가 있고 길이가 0보다 크면 사용 (필터링된 행)
+    if (targetRows && Array.isArray(targetRows) && targetRows.length > 0) {
       return targetRows;
     }
-    if (targetIsFiltered) {
+    
+    // targetIsFiltered가 true이고 targetRows가 명시적으로 빈 배열이면 빈 배열 반환
+    // (필터링이 적용되었지만 결과가 없는 경우)
+    if (targetIsFiltered && targetRows && Array.isArray(targetRows) && targetRows.length === 0) {
       return [];
     }
+    
+    // 그 외의 경우: 전체 행 반환 (필터링이 없거나 targetRows가 전달되지 않은 경우)
     return data?.rows ?? [];
   }
 
@@ -1036,7 +1044,6 @@
   }
 
   .row-preview-control.compact .row-number-input {
-    width: 60px;
     margin: 0;
     text-align: center;
   }

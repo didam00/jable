@@ -143,15 +143,50 @@ interface TransformSnapshotOptions {
 }
 
 function getTransformTargetRowsSnapshot(options?: TransformSnapshotOptions): Row[] {
-  const filteredCount = filteredRows.length;
-  const hasContext = hasFilterContext();
-  if (filteredCount > 0) {
-    return filteredRows;
+  // 필터링된 행을 동기적으로 계산
+  if (!data || !data.rows) {
+    return [];
   }
+  
+  const hasContext = hasFilterContext();
+  let rows = data.rows;
+  
+  // 검색 결과 필터링 적용
+  if (searchMatchedRowIds.size > 0) {
+    const matchedSet = searchMatchedRowIds;
+    rows = rows.filter((row) => matchedSet.has(row.id));
+  }
+  
+  // 컬럼 필터 적용
+  if (activeFilters.size > 0) {
+    const filterPairs = getFilterSnapshot();
+    if (filterPairs.length > 0) {
+      rows = rows.filter((row) => rowMatchesAllFilters(row, filterPairs));
+    }
+  }
+  
+  // 정렬 적용
+  if (sortColumn) {
+    rows = sortRows(rows, sortColumn, sortDirection);
+  }
+  
+  const filteredCount = rows.length;
+  
+  // 필터링 컨텍스트가 있고 결과가 비어있으면
+  if (hasContext && filteredCount === 0 && !options?.allowFallback) {
+    return [];
+  }
+  
+  // 필터링된 행이 있으면 반환, 없으면 전체 행 반환 (allowFallback이 true인 경우)
+  if (filteredCount > 0) {
+    return rows;
+  }
+  
   if (hasContext && !options?.allowFallback) {
     return [];
   }
-  return data?.rows ?? [];
+  
+  return data.rows;
 }
   
 function applySettings(settings: AppSettings) {
@@ -892,13 +927,15 @@ $: {
 
 $: {
   if (showTransformDialog) {
+    // 필터링된 행을 동기적으로 계산하여 스냅샷 가져오기
     const snapshot = getTransformTargetRowsSnapshot({ allowFallback: true });
-    const filteredCount = filteredRows.length;
     const hasContext = hasFilterContext();
+    const totalRows = data?.rows?.length ?? 0;
+    const isFiltered = hasContext || (snapshot.length > 0 && totalRows > 0 && snapshot.length !== totalRows);
+    
     dialogTargetRows = snapshot;
-    dialogTargetIsFiltered =
-      hasContext || (snapshot.length > 0 && data ? snapshot.length !== data.rows.length : false);
-    dialogTargetFilteredEmpty = hasContext && filteredCount === 0;
+    dialogTargetIsFiltered = isFiltered;
+    dialogTargetFilteredEmpty = hasContext && snapshot.length === 0;
   } else {
     dialogTargetRows = [];
     dialogTargetIsFiltered = false;
@@ -1387,8 +1424,12 @@ export function navigateToRow(rowId: string) {
   }
 
   function startCellEdit(rowId: string, columnKey: string) {
-    const row = data.rows.find((r) => r.id === rowId);
-    if (!row) return;
+    // filteredRows에서도 찾아보기
+    const row = data.rows.find((r) => r.id === rowId) || filteredRows.find((r) => r.id === rowId);
+    if (!row) {
+      console.warn(`Row not found: ${rowId}`);
+      return;
+    }
     
     const cell = row.cells[columnKey];
     editingCell = { rowId, columnKey };
@@ -1475,14 +1516,25 @@ export function navigateToRow(rowId: string) {
   function handleCellKeydown(event: KeyboardEvent, rowId: string, columnKey: string) {
     if (event.key === 'Enter') {
       event.preventDefault();
+      const previousEditingCell = editingCell;
       commitCellEdit();
       
-      // 다음 행으로 이동 (선택 사항)
+      if (!previousEditingCell) {
+        return;
+      }
+      
       const currentRowIndex = filteredRows.findIndex(r => r.id === rowId);
-      if (currentRowIndex < filteredRows.length - 1) {
-        const nextRow = filteredRows[currentRowIndex + 1];
+      if (currentRowIndex === -1) {
+        return;
+      }
+
+      const targetRowIndex = event.shiftKey ? currentRowIndex - 1 : currentRowIndex + 1;
+      const targetRow = filteredRows[targetRowIndex];
+
+      if (targetRow) {
         setTimeout(() => {
-          startCellEdit(nextRow.id, columnKey);
+          startCellEdit(targetRow.id, columnKey);
+          // handleCellClick(targetRow.id, columnKey, event);
         }, 0);
       }
     } else if (event.key === 'Tab') {
@@ -1514,12 +1566,13 @@ export function navigateToRow(rowId: string) {
     }
   }
 
-  function formatCellValue(cell: any): string {
-    // null 값은 빈 문자열로 표시 (결측값)
-    if (cell === null || cell === undefined) return '';
-    if (typeof cell === 'object') return JSON.stringify(cell);
-    return String(cell);
-  }
+function formatCellValue(cell: any): string {
+  // null 값은 빈 문자열로 표시 (결측값)
+  if (cell === null || cell === undefined) return '';
+  if (typeof cell === 'object') return JSON.stringify(cell);
+  return String(cell);
+}
+
 function formatNestedArrayValue(value: any): string {
   if (value === null || value === undefined) {
     return '';
@@ -1597,7 +1650,11 @@ function toggleChildArrayExpansion(rowId: string, columnKey: string) {
     if (columns.length === 0 || !code.trim()) {
       return;
     }
-    const targetRowsSnapshot = getTransformTargetRowsSnapshot({ allowFallback: false });
+    // 다이얼로그에서 전달받은 필터링된 행 사용
+    // dialogTargetRows가 있으면 사용, 없으면 전체 행 사용
+    const targetRowsSnapshot = dialogTargetRows.length > 0 
+      ? dialogTargetRows 
+      : (data?.rows ?? []);
     if (targetRowsSnapshot.length === 0) {
       return;
     }
@@ -3004,7 +3061,6 @@ $: if (data && displayColumns) {
     font-size: 0.8125rem;
   }
 
-
   .header-grid-wrapper {
     width: fit-content;
     max-width: 100%;
@@ -3040,8 +3096,10 @@ $: if (data && displayColumns) {
     overflow: visible;
     
     &:has(.cell-input.editing) {
-      border: 1px solid var(--accent);
+      /* border: 1px solid var(--accent); */
+      /* border-color: var(--accent); */
       background: var(--accent-alpha);
+      box-shadow: inset 0 0 0 1px var(--accent);
     }
   }
 

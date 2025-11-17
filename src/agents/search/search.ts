@@ -16,6 +16,17 @@ export function searchData(data: TableData, query: string, useRegex: boolean = f
     case 'normal':
       return normalSearch(data, parsed.text || '', useRegex);
     case 'column':
+      // columnAttributeSearch가 있으면 속성 검색
+      if (parsed.columnAttributeSearch) {
+        return columnAttributeSearch(
+          data, 
+          parsed.columnAttributeSearch.columnName, 
+          parsed.columnAttributeSearch.operator, 
+          parsed.columnAttributeSearch.value,
+          parsed.columnAttributeSearch.negated,
+          useRegex
+        );
+      }
       // column=str은 정확히 같은 경우만 검색 (포함이 아님)
       return columnExactSearch(data, parsed.columnName || '', parsed.text || '');
     case 'columnPresence':
@@ -111,6 +122,115 @@ function columnExactSearch(data: TableData, columnName: string, text: string): S
     
     // 정확히 같은 경우만 검색 (대소문자 구분 없음)
     if (cellValue.toLowerCase() === text.toLowerCase()) {
+      results.push({
+        rowId: row.id,
+        columnKey: column.key,
+        matches: 1,
+      });
+    }
+  });
+
+  return results;
+}
+
+// column^=value, column$=value, column*=value: CSS 속성 선택자 스타일 검색
+function columnAttributeSearch(
+  data: TableData, 
+  columnName: string, 
+  operator: '^=' | '$=' | '*=' | '=',
+  value: string,
+  negated: boolean,
+  useRegex: boolean
+): SearchResult[] {
+  const results: SearchResult[] = [];
+  const column = data.columns.find(col => col.key === columnName || col.label === columnName);
+  
+  if (!column) return [];
+
+  let regex: RegExp | null = null;
+  if (useRegex) {
+    try {
+      regex = new RegExp(value, 'gi');
+    } catch {
+      // 정규식 파싱 실패 시 일반 검색으로 폴백
+      regex = null;
+    }
+  }
+
+  data.rows.forEach((row) => {
+    const cell = row.cells[column.key];
+    if (!cell) {
+      // 셀이 없으면 negated인 경우에만 매치
+      if (negated) {
+        results.push({
+          rowId: row.id,
+          columnKey: column.key,
+          matches: 1,
+        });
+      }
+      return;
+    }
+
+    const cellValue = String(cell.value ?? '');
+    let matches = false;
+
+    if (useRegex && regex) {
+      // 정규식 검색
+      const match = cellValue.match(regex);
+      const regexMatch = match !== null;
+      
+      switch (operator) {
+        case '^=':
+          // 시작하는지 확인 (정규식)
+          if (regexMatch && match && match.index === 0) {
+            matches = true;
+          }
+          break;
+        case '$=':
+          // 끝나는지 확인 (정규식)
+          if (regexMatch && match && match[0]) {
+            const matchEnd = (match.index || 0) + match[0].length;
+            matches = matchEnd === cellValue.length;
+          }
+          break;
+        case '*=':
+          // 포함하는지 확인 (정규식)
+          matches = regexMatch;
+          break;
+        case '=':
+          // 정확히 일치하는지 확인 (정규식)
+          if (regexMatch && match && match[0] === cellValue) {
+            matches = true;
+          }
+          break;
+      }
+    } else {
+      // 일반 문자열 검색 (대소문자 구분 없음)
+      const lowerCellValue = cellValue.toLowerCase();
+      const lowerValue = value.toLowerCase();
+      
+      switch (operator) {
+        case '^=':
+          matches = lowerCellValue.startsWith(lowerValue);
+          break;
+        case '$=':
+          matches = lowerCellValue.endsWith(lowerValue);
+          break;
+        case '*=':
+          matches = lowerCellValue.includes(lowerValue);
+          break;
+        case '=':
+          matches = lowerCellValue === lowerValue;
+          break;
+      }
+    }
+
+    // 부정 처리
+    if (negated) {
+      matches = !matches;
+    }
+
+    if (matches) {
       results.push({
         rowId: row.id,
         columnKey: column.key,

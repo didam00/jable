@@ -22,17 +22,25 @@ export type NumericComparison = {
 
 export type StringComparison = {
   column: string;
-  operator: '>' | '>=' | '<' | '<=' | '=' | '!=' | '!>';
+  operator: '>' | '>=' | '<' | '<=' | '=' | '!=' | '!>' | '^=' | '$=' | '*=';
   value: string;
   isNumeric: false;
+  negated?: boolean;
 };
 
 export interface ParsedQuery {
   type: 'normal' | 'column' | 'columnPresence' | 'comparison' | 'stringComparison' | 'row' | 'rowRange' | 'rowList' | 'cell' | 'cellRange' | 'cellList' | 'columnFilter' | 'rowColumn';
   // normal 검색
   text?: string;
-  // column=key 검색
+  // column=key 검색 (정확한 일치)
   columnName?: string;
+  // column^=value, column$=value, column*=value 검색
+  columnAttributeSearch?: {
+    columnName: string;
+    operator: '^=' | '$=' | '*=' | '=';
+    value: string;
+    negated: boolean;
+  };
   // column= (missing) / column!= (exists)
   presenceCheck?: 'missing' | 'exists';
   // column>number, column>=number 등 (숫자 비교)
@@ -206,6 +214,34 @@ export function parseQuery(query: string): ParsedQuery {
       type: 'columnPresence',
       columnName: existsMatch[1],
       presenceCheck: 'exists',
+    };
+  }
+
+  // !column^=value, !column$=value, !column*=value, !column=value 형식 (부정 속성 검색)
+  const negatedAttributeMatch = trimmed.match(/^!\s*([a-zA-Z_][a-zA-Z0-9_.]*)\s*(\^=|\$=|\*=|=)\s*(.+)$/);
+  if (negatedAttributeMatch) {
+    return {
+      type: 'column',
+      columnAttributeSearch: {
+        columnName: negatedAttributeMatch[1],
+        operator: negatedAttributeMatch[2] as '^=' | '$=' | '*=' | '=',
+        value: negatedAttributeMatch[3],
+        negated: true,
+      },
+    };
+  }
+
+  // column^=value, column$=value, column*=value 형식 (속성 검색)
+  const attributeMatch = trimmed.match(/^([a-zA-Z_][a-zA-Z0-9_.]*)\s*(\^=|\$=|\*=)\s*(.+)$/);
+  if (attributeMatch) {
+    return {
+      type: 'column',
+      columnAttributeSearch: {
+        columnName: attributeMatch[1],
+        operator: attributeMatch[2] as '^=' | '$=' | '*=',
+        value: attributeMatch[3],
+        negated: false,
+      },
     };
   }
 
