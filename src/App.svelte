@@ -6,7 +6,6 @@
   import TableView from './components/TableView.svelte';
   import Toolbar from './components/Toolbar.svelte';
   // import SearchBar from './components/SearchBar.svelte';
-  import RawView from './components/RawView.svelte';
   import StatsPanel from './components/StatsPanel.svelte';
   import Tabs from './components/Tabs.svelte';
   import ProgressBar from './components/ProgressBar.svelte';
@@ -46,6 +45,25 @@
   let searchFilteredColumnKeys: string[] | null = null;
   let showSettings = false;
   const isTauriApp = isTauri();
+  type RawViewComponentType = typeof import('./components/RawView.svelte').default;
+  let RawViewComponent: RawViewComponentType | null = null;
+  let rawViewLoadPromise: Promise<void> | null = null;
+  async function ensureRawViewLoaded() {
+    if (RawViewComponent || rawViewLoadPromise) {
+      await rawViewLoadPromise;
+      return;
+    }
+    rawViewLoadPromise = import('./components/RawView.svelte').then((module) => {
+      RawViewComponent = module.default;
+    }).finally(() => {
+      rawViewLoadPromise = null;
+    });
+    await rawViewLoadPromise;
+  }
+
+  $: if (viewMode === 'raw') {
+    ensureRawViewLoaded();
+  }
 
   onMount(() => {
     dataStore.subscribe((value) => {
@@ -627,26 +645,29 @@
           />
         </div>
         <div class="view-container" class:hidden={viewMode !== 'raw'}>
-          <RawView 
-            on:navigateToCell={(e) => {
-              viewMode = 'table';
-              if (tableViewRef) {
-                tableViewRef.navigateToCell(e.detail.rowId, e.detail.columnKey);
-              }
-            }}
-            on:navigateToColumn={(e) => {
-              viewMode = 'table';
-              if (tableViewRef) {
-                tableViewRef.navigateToColumn(e.detail.columnKey);
-              }
-            }}
-            on:navigateToRow={(e) => {
-              viewMode = 'table';
-              if (tableViewRef) {
-                tableViewRef.navigateToRow(e.detail.rowId);
-              }
-            }}
-          />
+          {#if viewMode === 'raw' && RawViewComponent}
+            <svelte:component
+              this={RawViewComponent}
+              on:navigateToCell={(e) => {
+                viewMode = 'table';
+                if (tableViewRef) {
+                  tableViewRef.navigateToCell(e.detail.rowId, e.detail.columnKey);
+                }
+              }}
+              on:navigateToColumn={(e) => {
+                viewMode = 'table';
+                if (tableViewRef) {
+                  tableViewRef.navigateToColumn(e.detail.columnKey);
+                }
+              }}
+              on:navigateToRow={(e) => {
+                viewMode = 'table';
+                if (tableViewRef) {
+                  tableViewRef.navigateToRow(e.detail.rowId);
+                }
+              }}
+            />
+          {/if}
         </div>
       </div>
     {/if}

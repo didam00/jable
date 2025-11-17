@@ -87,6 +87,14 @@ let bottomSpacerHeight = 0;
 let originalRowIndexMap = new Map<string, number>();
 let lastDataRowsLength = 0;
 let lastDataRowsRef: Row[] | null = null;
+interface RowIndexBuildState {
+  cancelled: boolean;
+  idleHandle: number | null;
+  timeoutHandle: ReturnType<typeof setTimeout> | null;
+  rowsRef: Row[];
+  cancelScheduled: (() => void) | null;
+}
+let rowIndexBuildState: RowIndexBuildState | null = null;
 let lastScrollTop = -1;
 let lastContainerHeight = -1;
 let lastRenderRowCount = -1;
@@ -842,46 +850,130 @@ $: bottomSpacerHeight = Math.max(totalTableHeight - getRowOffsetByIndex(visibleE
   
   // 원본 행 인덱스 맵 (성능 최적화) - 지연 업데이트 및 캐싱
   
-  function updateOriginalRowIndexMap() {
-    // 데이터가 변경되지 않았으면 업데이트 스킵
-    if (lastDataRowsRef === data.rows && lastDataRowsLength === data.rows.length) {
+function cancelRowIndexBuild() {
+  if (!rowIndexBuildState) {
+    return;
+  }
+  rowIndexBuildState.cancelled = true;
+  if (rowIndexBuildState.cancelScheduled) {
+    rowIndexBuildState.cancelScheduled();
+  }
+  rowIndexBuildState = null;
+}
+
+function updateOriginalRowIndexMap() {
+  const currentRows = data.rows;
+  if (!currentRows) {
+    originalRowIndexMap.clear();
+    lastDataRowsRef = null;
+    lastDataRowsLength = 0;
+    cancelRowIndexBuild();
+    return;
+  }
+
+  if (lastDataRowsRef === currentRows && lastDataRowsLength === currentRows.length) {
+    return;
+  }
+
+  if (rowIndexBuildState) {
+    const sameTarget = rowIndexBuildState.rowsRef === currentRows;
+    if (sameTarget) {
       return;
     }
-    
-    // 대용량 데이터의 경우 배치 처리로 성능 최적화
-    const newMap = new Map<string, number>();
-    const batchSize = 5000; // 한 번에 처리할 행 수
-    
-    if (data.rows.length > batchSize) {
-      // 대용량 데이터는 배치로 처리
-      let processed = 0;
-      const processBatch = () => {
-        const end = Math.min(processed + batchSize, data.rows.length);
-        for (let i = processed; i < end; i++) {
-          newMap.set(data.rows[i].id, i);
-        }
-        processed = end;
-        
-        if (processed < data.rows.length) {
-          // 다음 배치를 다음 프레임에서 처리
-          requestIdleCallback(processBatch, { timeout: 50 });
-        } else {
-          originalRowIndexMap = newMap;
-          lastDataRowsRef = data.rows;
-          lastDataRowsLength = data.rows.length;
+    cancelRowIndexBuild();
+  }
+  
+  const newMap = new Map<string, number>();
+  const batchSize = 5000;
+  const rowCount = currentRows.length;
+  let lastLoggedProgress = -1;
+
+  if (rowCount <= batchSize) {
+    for (let i = 0; i < rowCount; i++) {
+      newMap.set(currentRows[i].id, i);
+    }
+    originalRowIndexMap = newMap;
+    lastDataRowsRef = currentRows;
+    lastDataRowsLength = rowCount;
+    return;
+  }
+
+  const state: RowIndexBuildState = {
+    cancelled: false,
+    idleHandle: null,
+    timeoutHandle: null,
+    rowsRef: currentRows,
+    cancelScheduled: null,
+  };
+  rowIndexBuildState = state;
+  let processed = 0;
+  console.info('[TableView] Row index rebuild started', { rowCount });
+
+  const scheduleNext = (cb: () => void) => {
+    if (typeof requestIdleCallback === 'function') {
+      state.idleHandle = requestIdleCallback(() => {
+        state.idleHandle = null;
+        state.timeoutHandle = null;
+        cb();
+      }, { timeout: 50 });
+      state.cancelScheduled = () => {
+        if (state.idleHandle !== null) {
+          cancelIdleCallback(state.idleHandle);
+          state.idleHandle = null;
         }
       };
-      processBatch();
     } else {
-      // 작은 데이터는 즉시 처리
-      for (let i = 0; i < data.rows.length; i++) {
-        newMap.set(data.rows[i].id, i);
-      }
-      originalRowIndexMap = newMap;
-      lastDataRowsRef = data.rows;
-      lastDataRowsLength = data.rows.length;
+      const timer = typeof window !== 'undefined' ? window.setTimeout : setTimeout;
+      state.timeoutHandle = timer(() => {
+        state.idleHandle = null;
+        state.timeoutHandle = null;
+        cb();
+      }, 16);
+      state.cancelScheduled = () => {
+        if (state.timeoutHandle !== null) {
+          clearTimeout(state.timeoutHandle);
+          state.timeoutHandle = null;
+        }
+      };
     }
-  }
+  };
+
+  const processBatch = () => {
+    if (!rowIndexBuildState || rowIndexBuildState !== state || state.cancelled) {
+      return;
+    }
+    const end = Math.min(processed + batchSize, rowCount);
+    for (let i = processed; i < end; i++) {
+      newMap.set(currentRows[i].id, i);
+    }
+    processed = end;
+    const progress = rowCount === 0 ? 1 : processed / rowCount;
+    if (progress - lastLoggedProgress >= 0.1 || processed === rowCount) {
+      lastLoggedProgress = progress;
+      console.info('[TableView] Row index rebuild progress', {
+        processed,
+        rowCount,
+        progress: Math.min(progress, 1),
+      });
+    }
+
+    if (processed < rowCount) {
+      scheduleNext(processBatch);
+      return;
+    }
+
+    if (state.cancelled) {
+      return;
+    }
+    originalRowIndexMap = newMap;
+    lastDataRowsRef = currentRows;
+    lastDataRowsLength = rowCount;
+    console.info('[TableView] Row index rebuild completed', { rowCount });
+    rowIndexBuildState = null;
+  };
+
+  processBatch();
+}
   
   // data.rows가 변경될 때만 맵 업데이트 (필요한 경우에만)
   $: {
