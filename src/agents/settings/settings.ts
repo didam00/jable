@@ -13,6 +13,8 @@ export interface AppSettings {
   maxChildArray: number; // 배열형 하위 열의 최대 세로 표시 개수 (-1은 제한 없음)
   maxHeaderRows: number; // 헤더에서 표시할 최대 층수 (-1은 제한 없음)
   rowHeight: number; // 슬롯(행) 높이
+  transformVariableName: string; // 단일 값 변환 변수명
+  transformArrayVariableName: string; // 배열 변환 변수명
 }
 
 const DEFAULT_SETTINGS: AppSettings = {
@@ -24,6 +26,8 @@ const DEFAULT_SETTINGS: AppSettings = {
   maxChildArray: -1,
   maxHeaderRows: -1,
   rowHeight: 32,
+  transformVariableName: 'a',
+  transformArrayVariableName: 'list',
 };
 
 const SETTINGS_STORAGE_KEY = 'json-editor-settings';

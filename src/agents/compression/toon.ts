@@ -26,7 +26,7 @@ interface ToonPayload {
   rows: Row[];
 }
 
-const DEFAULT_SHARE_BASE_URL = 'https://json-editor.app/share?toon=';
+const DEFAULT_SHARE_BASE_URL = 'https://jable.app/share?toon=';
 
 export interface ToonShareOptions {
   baseUrl?: string;

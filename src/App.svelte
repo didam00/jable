@@ -11,6 +11,8 @@
   import ProgressBar from './components/ProgressBar.svelte';
   import SettingsDialog from './components/SettingsDialog.svelte';
   import TitleBar from './components/TitleBar.svelte';
+  import ImportChoiceDialog from './components/ImportChoiceDialog.svelte';
+  import SecondaryTabPreview from './components/SecondaryTabPreview.svelte';
   import { compressToToon, decompressFromToon } from './agents/compression/toon';
   import type { TableData } from './agents/store';
   import type { Tab } from './types/tab';
@@ -59,6 +61,127 @@
       rawViewLoadPromise = null;
     });
     await rawViewLoadPromise;
+  }
+
+  type ImportChoice = 'merge' | 'new-tab' | 'cancel';
+  type TabContextAction = 'merge' | 'subtract' | 'intersect' | 'split';
+  interface PendingImport {
+    file: File | { path: string; name: string };
+    data: TableData;
+    format?: 'json' | 'csv' | 'xml' | 'toon';
+  }
+
+  let importDialogOpen = false;
+  let importDialogFileName = '';
+  let importDialogCanMerge = false;
+  let importDialogResolver: ((choice: ImportChoice) => void) | null = null;
+  let splitViewTabId: string | null = null;
+  let splitViewState: { tabId: string; tabName: string; data: TableData } | null = null;
+  $: splitViewState = splitViewTabId ? buildSplitViewState(splitViewTabId) : null;
+
+  function buildSplitViewState(tabId: string) {
+    const targetTab = tabs.find((tab) => tab.id === tabId);
+    if (!targetTab) {
+      return null;
+    }
+    try {
+      return {
+        tabId,
+        tabName: targetTab.name,
+        data: resolveTabData(targetTab),
+      };
+    } catch (error) {
+      console.error('[buildSplitViewState] 데이터 로드 실패', error);
+      return null;
+    }
+  }
+
+  function resolveTabData(tab: Tab): TableData {
+    if (tab.isCompressed && typeof tab.data === 'string') {
+      return decompressFromToon(tab.data);
+    }
+    if (typeof tab.data === 'string') {
+      return JSON.parse(tab.data);
+    }
+    return JSON.parse(JSON.stringify(tab.data));
+  }
+
+  function cloneTableData(table: TableData): TableData {
+    return JSON.parse(JSON.stringify(table));
+  }
+
+  function canMergeIntoActiveTab(): boolean {
+    if (!activeTabId) {
+      return false;
+    }
+    const current = dataStore.getCurrentData();
+    return current.rows.length > 0 || current.columns.length > 0;
+  }
+
+  function requestImportChoice(pending: PendingImport): Promise<ImportChoice> {
+    importDialogFileName = pending.file instanceof File ? pending.file.name : pending.file.name;
+    importDialogCanMerge = canMergeIntoActiveTab();
+    importDialogOpen = true;
+    return new Promise((resolve) => {
+      importDialogResolver = resolve;
+    });
+  }
+
+  function handleImportDialogSelect(event: CustomEvent<ImportChoice>) {
+    importDialogOpen = false;
+    importDialogResolver?.(event.detail);
+    importDialogResolver = null;
+  }
+
+  async function integrateImportedData(pending: PendingImport) {
+    if (canMergeIntoActiveTab()) {
+      const choice = await requestImportChoice(pending);
+      if (choice === 'cancel') {
+        return;
+      }
+      if (choice === 'merge') {
+        const merged = dataStore.mergeWith(cloneTableData(pending.data));
+        dataStore.set(merged);
+        return;
+      }
+    }
+
+    const tabId = createNewTab(pending.file, pending.data, pending.format);
+    switchToTab(tabId);
+  }
+
+  function closeSplitView() {
+    splitViewTabId = null;
+  }
+
+  async function handleTabContextAction(targetTabId: string, action: TabContextAction) {
+    if (!activeTabId || targetTabId === activeTabId) {
+      return;
+    }
+    const targetTab = tabs.find((tab) => tab.id === targetTabId);
+    if (!targetTab) {
+      return;
+    }
+    if (action === 'split') {
+      splitViewTabId = targetTabId;
+      return;
+    }
+    const targetData = resolveTabData(targetTab);
+    try {
+      if (action === 'merge') {
+        const merged = dataStore.mergeWith(targetData);
+        dataStore.set(merged);
+      } else if (action === 'subtract') {
+        const updated = dataStore.subtractWith(targetData);
+        dataStore.set(updated);
+      } else if (action === 'intersect') {
+        const updated = dataStore.intersectWith(targetData);
+        dataStore.set(updated);
+      }
+    } catch (error) {
+      console.error('[handleTabContextAction] 데이터 처리 실패', error);
+      alert(`데이터 처리 중 오류가 발생했습니다: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
   }
 
   $: if (viewMode === 'raw') {
@@ -302,6 +425,9 @@
     dataStore.deleteTabHistory(tabId);
     
     tabs = tabs.filter(t => t.id !== tabId);
+    if (splitViewTabId === tabId) {
+      splitViewTabId = null;
+    }
     
     // 닫은 탭이 활성 탭이었다면 다른 탭으로 전환
     if (activeTabId === tabId) {
@@ -345,9 +471,7 @@
         throw new Error('유효하지 않은 데이터 형식입니다.');
       }
       
-      // 항상 새 탭으로 열기
-      createNewTab(file, result.data, result.format);
-      switchToTab(activeTabId!);
+      await integrateImportedData({ file, data: result.data, format: result.format });
       
       showProgress = false;
     } catch (error) {
@@ -478,11 +602,7 @@
               progressMessage = `${file.name}: ${msg}`;
             });
             
-            createNewTab(file, result.data, result.format);
-            if (file === files[files.length - 1]) {
-              // 마지막 파일을 활성 탭으로 설정
-              switchToTab(activeTabId!);
-            }
+            await integrateImportedData({ file, data: result.data, format: result.format });
             
             showProgress = false;
           } catch (error) {
@@ -532,10 +652,7 @@
                       progressMessage = `${file.name}: ${msg}`;
                     });
                     
-                    createNewTab(file, result.data, result.format);
-                    if (i === items.length - 1) {
-                      switchToTab(activeTabId!);
-                    }
+                    await integrateImportedData({ file, data: result.data, format: result.format });
                     
                     showProgress = false;
                   } catch (error) {
@@ -601,6 +718,7 @@
       {activeTabId}
       onTabClick={switchToTab}
       onTabClose={closeTab}
+      onTabContextAction={handleTabContextAction}
     />
   {/if}
   <main class="main-content">
@@ -633,47 +751,64 @@
           </button>
         </div>
       </div>
-      <div class="view-wrapper">
-        <div class="view-container" class:hidden={viewMode !== 'table'}>
-          <TableView 
-            bind:this={tableViewRef}
-            {searchMatchedRowIds}
-            searchFilteredColumnKeys={searchFilteredColumnKeys}
-            on:stateChange={(e) => {
-              tableState = e.detail;
-            }}
-          />
-        </div>
-        <div class="view-container" class:hidden={viewMode !== 'raw'}>
-          {#if viewMode === 'raw' && RawViewComponent}
-            <svelte:component
-              this={RawViewComponent}
-              on:navigateToCell={(e) => {
-                viewMode = 'table';
-                if (tableViewRef) {
-                  tableViewRef.navigateToCell(e.detail.rowId, e.detail.columnKey);
-                }
-              }}
-              on:navigateToColumn={(e) => {
-                viewMode = 'table';
-                if (tableViewRef) {
-                  tableViewRef.navigateToColumn(e.detail.columnKey);
-                }
-              }}
-              on:navigateToRow={(e) => {
-                viewMode = 'table';
-                if (tableViewRef) {
-                  tableViewRef.navigateToRow(e.detail.rowId);
-                }
+      <div class="view-wrapper" class:with-split={Boolean(splitViewState)}>
+        <div class="primary-pane">
+          <div class="view-container" class:hidden={viewMode !== 'table'}>
+            <TableView 
+              bind:this={tableViewRef}
+              {searchMatchedRowIds}
+              searchFilteredColumnKeys={searchFilteredColumnKeys}
+              on:stateChange={(e) => {
+                tableState = e.detail;
               }}
             />
-          {/if}
+          </div>
+          <div class="view-container" class:hidden={viewMode !== 'raw'}>
+            {#if viewMode === 'raw' && RawViewComponent}
+              <svelte:component
+                this={RawViewComponent}
+                on:navigateToCell={(e) => {
+                  viewMode = 'table';
+                  if (tableViewRef) {
+                    tableViewRef.navigateToCell(e.detail.rowId, e.detail.columnKey);
+                  }
+                }}
+                on:navigateToColumn={(e) => {
+                  viewMode = 'table';
+                  if (tableViewRef) {
+                    tableViewRef.navigateToColumn(e.detail.columnKey);
+                  }
+                }}
+                on:navigateToRow={(e) => {
+                  viewMode = 'table';
+                  if (tableViewRef) {
+                    tableViewRef.navigateToRow(e.detail.rowId);
+                  }
+                }}
+              />
+            {/if}
+          </div>
         </div>
+        {#if splitViewState}
+          <div class="secondary-pane">
+            <SecondaryTabPreview
+              tabName={splitViewState.tabName}
+              data={splitViewState.data}
+              on:close={closeSplitView}
+            />
+          </div>
+        {/if}
       </div>
     {/if}
   </main>
   <ProgressBar progress={progress} message={progressMessage} visible={showProgress} />
   <SettingsDialog isOpen={showSettings} onClose={() => { showSettings = false; }} />
+  <ImportChoiceDialog
+    open={importDialogOpen}
+    fileName={importDialogFileName}
+    canMerge={importDialogCanMerge}
+    on:select={handleImportDialogSelect}
+  />
 </div>
 
 <style>
@@ -699,7 +834,44 @@
     overflow: hidden;
     display: flex;
     flex-direction: column;
+    gap: 0;
+  }
+
+  .view-wrapper.with-split {
+    flex-direction: row;
+  }
+
+  .primary-pane {
+    flex: 1;
+    min-width: 0;
     position: relative;
+  }
+
+  .secondary-pane {
+    width: 38%;
+    min-width: 320px;
+    max-width: 640px;
+    display: flex;
+    flex-direction: column;
+    border-left: 1px solid var(--border);
+  }
+
+  @media (max-width: 1400px) {
+    .secondary-pane {
+      width: 45%;
+    }
+  }
+
+  @media (max-width: 1100px) {
+    .view-wrapper.with-split {
+      flex-direction: column;
+    }
+    .secondary-pane {
+      width: 100%;
+      min-height: 40%;
+      border-left: none;
+      border-top: 1px solid var(--border);
+    }
   }
 
   .view-container {

@@ -14,13 +14,25 @@
     maxChildArray: -1,
     maxHeaderRows: -1,
     rowHeight: 32,
+    transformVariableName: 'a',
+    transformArrayVariableName: 'list',
   };
 
   $: settingsStore.subscribe((value) => {
     settings = { ...value };
   })();
 
+  function sanitizeVarName(name: string, fallback: string): string {
+    const trimmed = name.trim();
+    if (!trimmed) {
+      return fallback;
+    }
+    return /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(trimmed) ? trimmed : fallback;
+  }
+
   function handleSave() {
+    settings.transformVariableName = sanitizeVarName(settings.transformVariableName, 'a');
+    settings.transformArrayVariableName = sanitizeVarName(settings.transformArrayVariableName, 'list');
     settingsStore.set(settings);
     onClose();
   }
@@ -148,6 +160,34 @@
             />
           </label>
           <p class="settings-description">스크롤 시 위/아래에 미리 로드할 행 개수입니다.</p>
+        </div>
+
+        <div class="settings-group">
+          <label class="settings-label">
+            <span>단일 변환 변수명</span>
+            <input
+              type="text"
+              maxlength="32"
+              bind:value={settings.transformVariableName}
+              class="settings-input"
+              placeholder="예: value"
+            />
+          </label>
+          <p class="settings-description">단일 값 변환에서 사용할 변수명을 지정합니다. (기본: a)</p>
+        </div>
+
+        <div class="settings-group">
+          <label class="settings-label">
+            <span>배열 변환 변수명</span>
+            <input
+              type="text"
+              maxlength="32"
+              bind:value={settings.transformArrayVariableName}
+              class="settings-input"
+              placeholder="예: rows"
+            />
+          </label>
+          <p class="settings-description">배열 변환에서 사용할 변수명을 지정합니다. (기본: list)</p>
         </div>
       </div>
       <div class="settings-footer">

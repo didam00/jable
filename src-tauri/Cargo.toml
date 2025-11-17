@@ -1,5 +1,5 @@
 [package]
-name = "json-table-editor"
+name = "jable"
 version = "0.1.0"
 description = "A JSON table editor built with Tauri"
 authors = ["you"]

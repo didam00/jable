@@ -12,6 +12,7 @@
 
   let filterValue = '';
   let uniqueValues: any[] = [];
+  let filteredValues: any[] = [];
   let displayedValues: any[] = [];
   let showMore = false;
   const INITIAL_DISPLAY_COUNT = 5;
@@ -23,21 +24,20 @@
       // 항상 원본 데이터의 모든 행에서 고유 값 추출
       uniqueValues = getColumnValues(data, column.key);
       showMore = false; // 필터가 다시 열릴 때 초기화
+      filteredValues = uniqueValues;
       updateDisplayedValues();
     } else {
       // 필터가 닫히거나 데이터가 없으면 값 목록 초기화
       uniqueValues = [];
+      filteredValues = [];
       displayedValues = [];
       showMore = false;
     }
   })();
 
   function updateDisplayedValues() {
-    if (showMore) {
-      displayedValues = uniqueValues;
-    } else {
-      displayedValues = uniqueValues.slice(0, INITIAL_DISPLAY_COUNT);
-    }
+    const source = filteredValues;
+    displayedValues = showMore ? source : source.slice(0, INITIAL_DISPLAY_COUNT);
   }
 
   $: if (showMore !== undefined) {
@@ -57,13 +57,28 @@
   }
 
 
-  function handleFilter() {
+  function handleFilterInput() {
     onFilter(column.key, filterValue);
   }
 
   function selectValue(value: any) {
-    filterValue = String(value);
-    handleFilter();
+    filterValue = formatDisplayValue(value);
+    const encoded = encodeFilterToken(value);
+    onFilter(column.key, encoded);
+  }
+
+  function formatDisplayValue(value: any): string {
+    if (value === null) return 'null';
+    if (value === undefined) return 'undefined';
+    if (value === '') return '';
+    return String(value);
+  }
+
+  function encodeFilterToken(value: any): string {
+    if (value === null) return '__SPECIAL_NULL__';
+    if (value === undefined) return '__SPECIAL_UNDEFINED__';
+    if (value === '') return '__SPECIAL_EMPTY__';
+    return String(value);
   }
 </script>
 
@@ -91,7 +106,7 @@
         class="filter-input"
         placeholder="필터 값..."
         bind:value={filterValue}
-        on:input={handleFilter}
+        on:input={handleFilterInput}
       />
       {#if uniqueValues.length > 0}
         <div class="value-list">
@@ -240,6 +255,7 @@
     background: var(--bg-primary);
     color: var(--text-primary);
   }
+
 
   .filter-input::placeholder {
     color: var(--text-secondary);

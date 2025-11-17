@@ -3,7 +3,7 @@
  */
 import { writable } from 'svelte/store';
 import type { Writable } from 'svelte/store';
-import type { TableData, Row } from './types';
+import type { TableData, Row, Column, Cell } from './types';
 import type { HistoryState } from '../../types/tab';
 import { settingsStore } from '../settings/settings';
 
@@ -224,6 +224,83 @@ class DataStore {
   }
 
 
+  private ensureCurrentData(): TableData {
+    if (!this.currentData) {
+      this.store.subscribe((data) => {
+        this.currentData = data;
+      })();
+    }
+    if (!this.currentData) {
+      return {
+        columns: [],
+        rows: [],
+        metadata: { rowCount: 0, columnCount: 0, isFlat: true },
+      };
+    }
+    return this.currentData;
+  }
+
+  private buildCombinedColumns(base: Column[], incoming: Column[]): Column[] {
+    const existingKeys = new Set(base.map((col) => col.key));
+    const combined = base.map((col) => ({ ...col }));
+    incoming.forEach((col) => {
+      if (!existingKeys.has(col.key)) {
+        combined.push({ ...col });
+        existingKeys.add(col.key);
+      }
+    });
+    return combined;
+  }
+
+  private normalizeRows(rows: Row[], columns: Column[]): Row[] {
+    return rows.map((row) => {
+      const normalizedCells: Record<string, Cell> = {};
+      columns.forEach((col) => {
+        const cell = row.cells[col.key];
+        if (cell) {
+          normalizedCells[col.key] = { ...cell };
+        } else {
+          normalizedCells[col.key] = { value: '', type: 'string' };
+        }
+      });
+      return {
+        id: row.id,
+        cells: normalizedCells,
+      };
+    });
+  }
+
+  private getRowSignature(row: Row, columns: Column[]): string {
+    const signatureParts = columns.map((col) => {
+      const cell = row.cells[col.key];
+      return JSON.stringify({
+        value: cell?.value ?? null,
+        type: cell?.type ?? 'string',
+      });
+    });
+    return signatureParts.join('|');
+  }
+
+  private buildResult(columns: Column[], rows: Row[], isFlat: boolean): TableData {
+    return {
+      columns,
+      rows,
+      metadata: {
+        rowCount: rows.length,
+        columnCount: columns.length,
+        isFlat,
+      },
+    };
+  }
+
+  private prepareSetOperation(targetData: TableData) {
+    const current = this.ensureCurrentData();
+    const combinedColumns = this.buildCombinedColumns(current.columns, targetData.columns);
+    const normalizedCurrent = this.normalizeRows(current.rows, combinedColumns);
+    const normalizedTarget = this.normalizeRows(targetData.rows, combinedColumns);
+    return { combinedColumns, normalizedCurrent, normalizedTarget };
+  }
+
   merge(newData: TableData): TableData {
     if (!this.currentData) {
       this.store.subscribe((data) => {
@@ -235,15 +312,7 @@ class DataStore {
       return newData;
     }
 
-    // 컬럼 병합 (중복 제거)
-    const existingColumnKeys = new Set(this.currentData.columns.map((col) => col.key));
-    const newColumns = this.currentData.columns.slice();
-    newData.columns.forEach((col) => {
-      if (!existingColumnKeys.has(col.key)) {
-        newColumns.push(col);
-        existingColumnKeys.add(col.key);
-      }
-    });
+    const newColumns = this.buildCombinedColumns(this.currentData.columns, newData.columns);
 
     // 행 병합 (모든 행 추가)
     const mergedRows = [...this.currentData.rows];
@@ -280,6 +349,28 @@ class DataStore {
     };
 
     return merged;
+  }
+
+  mergeWith(newData: TableData): TableData {
+    return this.merge(newData);
+  }
+
+  subtractWith(newData: TableData): TableData {
+    const { combinedColumns, normalizedCurrent, normalizedTarget } = this.prepareSetOperation(newData);
+    const targetSignatures = new Set(normalizedTarget.map((row) => this.getRowSignature(row, combinedColumns)));
+    const filteredRows = normalizedCurrent.filter((row) => !targetSignatures.has(this.getRowSignature(row, combinedColumns)));
+    const current = this.ensureCurrentData();
+    const isFlat = current.metadata.isFlat && newData.metadata.isFlat;
+    return this.buildResult(combinedColumns, filteredRows, isFlat);
+  }
+
+  intersectWith(newData: TableData): TableData {
+    const { combinedColumns, normalizedCurrent, normalizedTarget } = this.prepareSetOperation(newData);
+    const targetSignatures = new Set(normalizedTarget.map((row) => this.getRowSignature(row, combinedColumns)));
+    const filteredRows = normalizedCurrent.filter((row) => targetSignatures.has(this.getRowSignature(row, combinedColumns)));
+    const current = this.ensureCurrentData();
+    const isFlat = current.metadata.isFlat && newData.metadata.isFlat;
+    return this.buildResult(combinedColumns, filteredRows, isFlat);
   }
 }
 

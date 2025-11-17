@@ -56,6 +56,15 @@ export interface TransformOptions {
   mode: TransformMode;
   columns?: string[];
   rowData?: Record<string, any>; // 단일 값 변환에서 같은 행의 다른 열 값을 가져오기 위해
+  singleVariableName?: string;
+  arrayVariableName?: string;
+}
+
+function getValidIdentifier(name: string | undefined, fallback: string): string {
+  if (!name) return fallback;
+  const trimmed = name.trim();
+  if (!trimmed) return fallback;
+  return /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(trimmed) ? trimmed : fallback;
 }
 
 /**
@@ -65,11 +74,14 @@ function normalizeCode(code: string): string {
   const trimmed = code.trim();
   if (!trimmed) return trimmed;
 
+  // return void; → return void 0;
+  const voidAdjusted = trimmed.replace(/return\s+void\s*;/g, 'return void 0;');
+
   // 세미콜론으로 구분된 줄 수 확인
-  const lines = trimmed.split(';').filter(line => line.trim().length > 0);
+  const lines = voidAdjusted.split(';').filter(line => line.trim().length > 0);
   const hasMultipleStatements = lines.length > 1;
-  const hasReturn = /\breturn\b/.test(trimmed);
-  const hasControlFlow = /\b(if|while|for|switch)\s*\(/.test(trimmed);
+  const hasReturn = /\breturn\b/.test(voidAdjusted);
+  const hasControlFlow = /\b(if|while|for|switch)\s*\(/.test(voidAdjusted);
 
   // 여러 줄이거나 제어문이 있으면 return 필요
   if (hasMultipleStatements || hasControlFlow) {
@@ -85,10 +97,10 @@ function normalizeCode(code: string): string {
 
   // 한 줄이고 return이 없으면 자동 추가
   if (!hasReturn && lines.length === 1) {
-    return `return ${trimmed}`;
+    return `return ${voidAdjusted}`;
   }
 
-  return trimmed;
+  return voidAdjusted;
 }
 
 /**
@@ -283,12 +295,13 @@ export function executeFunctionSync(
     if (mode === 'array') {
       // 배열 변환 모드: list 변수 제공
       const list = Array.isArray(value) ? value : [value];
+      const arrayVariableName = getValidIdentifier(options?.arrayVariableName, 'list');
       
       // 배열 변환 모드: void나 undefined 반환 시 해당 인덱스 행 삭제
       let processedCode = normalizedCode;
       const deletedIndexes: number[] = [];
       
-      const func = new Function('list', processedCode);
+      const func = new Function(arrayVariableName, processedCode);
       let result = func(list);
       
       // undefined나 void가 포함된 배열인 경우 필터링
@@ -360,7 +373,8 @@ export function executeFunctionSync(
       // return 키워드가 있는지 확인 (명시적 반환 여부)
       const hasExplicitReturn = /\breturn\b/.test(finalCode);
       
-      const func = new Function('a', finalCode);
+      const singleVariableName = getValidIdentifier(options?.singleVariableName, 'a');
+      const func = new Function(singleVariableName, finalCode);
       const result = func(value);
       
       // 명시적으로 return이 있고 결과가 undefined면 행 삭제

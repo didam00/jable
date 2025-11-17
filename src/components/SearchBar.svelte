@@ -26,6 +26,9 @@
     }
   });
 
+  // query가 변경될 때마다 즉시 검색 실행
+  $: query, performSearch();
+
   onMount(() => {
     function handleGlobalKeydown(event: KeyboardEvent) {
       // Ctrl+G 또는 Ctrl+F로 검색창 포커스
@@ -47,7 +50,8 @@
   });
 
   function performSearch() {
-    if (!query.trim()) {
+    const trimmed = query.trim();
+    if (!trimmed) {
       results = [];
       dispatch('searchChange', { 
         matchedRowIds: new Set<string>(),
@@ -56,8 +60,8 @@
       return;
     }
     
-    const parsed = parseQuery(query);
-    results = searchData(data, query, useRegex);
+    const parsed = parseQuery(trimmed);
+    results = searchData(data, trimmed, useRegex);
     
     // 검색된 행 ID들을 Set으로 만들어서 전달
     const matchedRowIds = new Set<string>(results.map(r => r.rowId));
@@ -78,8 +82,6 @@
         matchedRowIds: new Set<string>(),
         filteredColumnKeys: null,
       });
-    } else if (event.key === 'Enter' && event.ctrlKey) {
-      performSearch();
     }
   }
 
@@ -166,9 +168,8 @@
     bind:this={searchInput}
     type="text"
     class="search-input"
-    placeholder="검색... (Ctrl+G/F: 포커스, Ctrl+Enter: 검색, Esc: 닫기)"
+    placeholder="검색... (Ctrl+G/F: 포커스, Esc: 닫기)"
     bind:value={query}
-    on:input={performSearch}
     on:keydown={handleKeydown}
   />
   <button

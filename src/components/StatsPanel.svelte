@@ -26,6 +26,12 @@
     }
   }
 
+  function refresh() {
+    if (tableViewRef?.refresh) {
+      tableViewRef.refresh();
+    }
+  }
+
   $: hasActiveSort = tableState?.sortColumn !== null;
   $: hasActiveFilters = Object.keys(tableState?.filters || {}).length > 0;
 </script>
@@ -43,6 +49,10 @@
     <span class="stat-label">타입:</span>
     <span class="stat-value">{data.metadata.isFlat ? 'Flat' : 'Nested'}</span>
   </div>
+  
+  <button class="refresh-button" on:click={refresh} title="테이블 새로고침">
+    <span class="material-icons">refresh</span>
+  </button>
   
   {#if hasActiveSort && tableState.sortColumn}
     <div class="filter-badge">
@@ -137,6 +147,37 @@
 
   .badge-close:hover .material-icons {
     color: var(--text-primary);
+  }
+
+  .refresh-button {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    padding: 0;
+    border: none;
+    cursor: pointer;
+    transition: all 0.2s;
+    margin: 0 -1rem;
+  }
+
+  .refresh-button .material-icons {
+    font-size: 16px;
+    color: var(--text-secondary);
+  }
+
+  .refresh-button:hover {
+    rotate: 20deg;
+  }
+
+  .refresh-button:hover .material-icons {
+    color: var(--text-primary);
+  }
+
+  .refresh-button:active {
+    transform: rotate(180deg);
+    transition: transform 0.3s;
   }
 </style>
 

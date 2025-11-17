@@ -1,16 +1,16 @@
 <script lang="ts">
-  import { dataStore } from '../agents/store';
-  import type { TableData, Row, Column } from '../agents/store';
-  import { sortRows } from '../agents/filters';
-  import ColumnFilter from './ColumnFilter.svelte';
-  // @ts-ignore - Svelte 컴포넌트는 자동으로 default export를 생성합니다
-  import ColumnTransformDialog from './ColumnTransformDialog.svelte';
-  import ContextMenu from './ContextMenu.svelte';
-  import ImageViewer from './ImageViewer.svelte';
-  import { executeFunctionSync, DELETE_MARKER } from '../utils/safeFunctionExecutor';
-  import { onMount, createEventDispatcher } from 'svelte';
-  import { settingsStore } from '../agents/settings/settings';
-  import type { AppSettings } from '../agents/settings/settings';
+import { dataStore } from '../agents/store';
+import type { TableData, Row, Column } from '../agents/store';
+import { sortRows } from '../agents/filters';
+import ColumnFilter from './ColumnFilter.svelte';
+// @ts-ignore - Svelte 컴포넌트는 자동으로 default export를 생성합니다
+import ColumnTransformDialog from './ColumnTransformDialog.svelte';
+import ContextMenu from './ContextMenu.svelte';
+import ImageViewer from './ImageViewer.svelte';
+import { executeFunctionSync, DELETE_MARKER } from '../utils/safeFunctionExecutor';
+import { onMount, createEventDispatcher } from 'svelte';
+import { settingsStore } from '../agents/settings/settings';
+import type { AppSettings } from '../agents/settings/settings';
   
 const dispatch = createEventDispatcher();
 
@@ -35,7 +35,13 @@ let sortDirection: 'asc' | 'desc' = 'asc';
 let filteredRows: Row[] = [];
 let renderRowCount = 0;
 let columnWidths: Map<string, number> = new Map();
-let activeFilters: Map<string, string> = new Map();
+type ColumnFilterValue =
+  | { kind: 'text'; value: string }
+  | { kind: 'null' }
+  | { kind: 'undefined' }
+  | { kind: 'empty' };
+
+let activeFilters: Map<string, ColumnFilterValue> = new Map();
 let resizingColumn: string | null = null;
 let resizeStartX = 0;
 let resizeStartWidth = 0;
@@ -117,6 +123,36 @@ let hasNestedHeaders = false;
 let columnParentMap: Map<string, string> = new Map();
 let headerScrollStyle = '';
 const imageUrlCache = new Map<string, boolean>();
+let dialogTargetRows: Row[] = [];
+let dialogTargetIsFiltered = false;
+let dialogTargetFilteredEmpty = false;
+
+function sanitizeVariableIdentifier(name: string | undefined, fallback: string): string {
+  if (!name) return fallback;
+  const trimmed = name.trim();
+  if (!trimmed) return fallback;
+  return /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(trimmed) ? trimmed : fallback;
+}
+
+function hasFilterContext(): boolean {
+  return activeFilters.size > 0 || (searchMatchedRowIds?.size ?? 0) > 0;
+}
+
+interface TransformSnapshotOptions {
+  allowFallback?: boolean;
+}
+
+function getTransformTargetRowsSnapshot(options?: TransformSnapshotOptions): Row[] {
+  const filteredCount = filteredRows.length;
+  const hasContext = hasFilterContext();
+  if (filteredCount > 0) {
+    return filteredRows;
+  }
+  if (hasContext && !options?.allowFallback) {
+    return [];
+  }
+  return data?.rows ?? [];
+}
   
 function applySettings(settings: AppSettings) {
   maxVisibleRows = settings.maxVisibleRows;
@@ -205,6 +241,89 @@ function buildColumnHeaderTree(columns: Column[]): ColumnHeaderTreeNode[] {
   });
 
   return rootChildren;
+}
+
+function parseFilterValue(rawValue: string): ColumnFilterValue | null {
+  if (rawValue === '__SPECIAL_NULL__') {
+    return { kind: 'null' };
+  }
+  if (rawValue === '__SPECIAL_UNDEFINED__') {
+    return { kind: 'undefined' };
+  }
+  if (rawValue === '__SPECIAL_EMPTY__') {
+    return { kind: 'empty' };
+  }
+  const trimmed = rawValue.trim();
+  if (!trimmed) {
+    return null;
+  }
+  const normalized = trimmed.toLowerCase();
+  if (normalized === 'null') {
+    return { kind: 'null' };
+  }
+  if (normalized === 'undefined') {
+    return { kind: 'undefined' };
+  }
+  if (normalized === '""' || normalized === 'empty' || normalized === '(빈 문자열)') {
+    return { kind: 'empty' };
+  }
+  return { kind: 'text', value: rawValue };
+}
+
+function normalizeCellText(value: any): string {
+  if (value === null) {
+    return 'null';
+  }
+  if (value === undefined) {
+    return 'undefined';
+  }
+  return String(value ?? '');
+}
+
+function matchesFilter(row: Row, columnKey: string, filter: ColumnFilterValue): boolean {
+  const cell = row.cells[columnKey];
+  const cellValue = cell ? cell.value : undefined;
+  switch (filter.kind) {
+    case 'null':
+      return cellValue === null;
+    case 'undefined':
+      return !cell || cellValue === undefined;
+    case 'empty':
+      return cellValue === '';
+    case 'text': {
+      const haystack = normalizeCellText(cellValue).toLowerCase();
+      return haystack.includes(filter.value.toLowerCase());
+    }
+    default:
+      return true;
+  }
+}
+
+function rowMatchesAllFilters(row: Row, filters: Array<[string, ColumnFilterValue]>): boolean {
+  for (const [columnKey, filter] of filters) {
+    if (!matchesFilter(row, columnKey, filter)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function getFilterSnapshot(): Array<[string, ColumnFilterValue]> {
+  return Array.from(activeFilters.entries()).sort(([a], [b]) => a.localeCompare(b));
+}
+
+function describeFilterValue(filter: ColumnFilterValue): string {
+  switch (filter.kind) {
+    case 'null':
+      return 'null';
+    case 'undefined':
+      return 'undefined';
+    case 'empty':
+      return '(빈 문자열)';
+    case 'text':
+    default:
+      return filter.value;
+  }
 }
 
 function getMaxHeaderDepth(nodes: ColumnHeaderTreeNode[]): number {
@@ -625,13 +744,15 @@ function getArrayEntryFieldValue(entry: any, fieldPath: string[] | undefined): a
   function updateFilteredRows() {
     if (!data || !data.rows) {
       filteredRows = [];
+      recomputeRowMetrics();
+      forceVisibleRowsRefresh();
       return;
     }
     
     // 현재 필터 상태를 문자열로 만들어서 비교
     const currentFilterState = JSON.stringify({
       searchCount: searchMatchedRowIds.size,
-      filters: Array.from(activeFilters.entries()).sort(),
+      filters: getFilterSnapshot(),
       sortColumn,
       sortDirection,
       rowsLength: data.rows.length,
@@ -673,40 +794,20 @@ function getArrayEntryFieldValue(entry: any, fieldPath: string[] | undefined): a
     
     // 컬럼 필터 적용
     if (activeFilters.size > 0) {
-      const filterLower = new Map<string, string>();
-      activeFilters.forEach((value, key) => {
-        filterLower.set(key, value.toLowerCase());
-      });
-      
-      if (isLargeData) {
-        // 대용량 데이터는 배치 처리
-        const batchSize = 1000;
-        const filtered: Row[] = [];
-        for (let i = 0; i < rows.length; i += batchSize) {
-          const batch = rows.slice(i, i + batchSize);
-          filtered.push(...batch.filter((row) => {
-            for (const [columnKey, filterValue] of filterLower.entries()) {
-              const cell = row.cells[columnKey];
-              const cellValue = cell?.value ?? '';
-              if (!String(cellValue).toLowerCase().includes(filterValue)) {
-                return false;
-              }
-            }
-            return true;
-          }));
-        }
-        rows = filtered;
-      } else {
-        rows = rows.filter((row) => {
-          for (const [columnKey, filterValue] of filterLower.entries()) {
-            const cell = row.cells[columnKey];
-            const cellValue = cell?.value ?? '';
-            if (!String(cellValue).toLowerCase().includes(filterValue)) {
-              return false;
-            }
+      const filterPairs = getFilterSnapshot();
+      if (filterPairs.length > 0) {
+        if (isLargeData) {
+          // 대용량 데이터는 배치 처리
+          const batchSize = 1000;
+          const filtered: Row[] = [];
+          for (let i = 0; i < rows.length; i += batchSize) {
+            const batch = rows.slice(i, i + batchSize);
+            filtered.push(...batch.filter((row) => rowMatchesAllFilters(row, filterPairs)));
           }
-          return true;
-        });
+          rows = filtered;
+        } else {
+          rows = rows.filter((row) => rowMatchesAllFilters(row, filterPairs));
+        }
       }
     }
     
@@ -721,6 +822,18 @@ function getArrayEntryFieldValue(entry: any, fieldPath: string[] | undefined): a
     } else {
       filteredRows = rows;
     }
+  
+    // rowHeights가 업데이트되기 전에 updateVisibleRows가 호출되는 것을 방지하기 위해
+    // requestAnimationFrame으로 동기화
+    if (filterUpdateFrame !== null) {
+      cancelAnimationFrame(filterUpdateFrame);
+    }
+    filterUpdateFrame = requestAnimationFrame(() => {
+      arrayDisplayCache.clear();
+      recomputeRowMetrics();
+      forceVisibleRowsRefresh();
+      filterUpdateFrame = null;
+    });
   }
   
   function updateStateAndDispatch() {
@@ -738,7 +851,9 @@ function getArrayEntryFieldValue(entry: any, fieldPath: string[] | undefined): a
       dispatch('stateChange', {
         sortColumn,
         sortDirection,
-        filters: Object.fromEntries(activeFilters),
+        filters: Object.fromEntries(
+          Array.from(activeFilters.entries()).map(([key, filter]) => [key, describeFilterValue(filter)])
+        ),
       });
       filterUpdateTimeout = null;
     }, 0); // 다음 틱에서 실행
@@ -771,74 +886,105 @@ $: {
     lastSearchMatchedSize = currentSize;
     lastFilterState = ''; // 강제 업데이트
     updateStateAndDispatch();
+    forceVisibleRowsRefresh();
   }
 }
 
-  function handleSort(columnKey: string) {
-    const columnMeta = displayColumnMeta.get(columnKey);
-    if (!columnMeta || columnMeta.kind !== 'scalar') {
-      return;
-    }
-    if (sortColumn === columnKey) {
-      sortDirection = sortDirection === 'asc' ? 'desc' : 'asc';
-    } else {
-      sortColumn = columnKey;
-      sortDirection = 'asc';
-    }
-    // 정렬 변경 시 필터 상태 캐시 리셋
-    lastFilterState = '';
-    updateStateAndDispatch();
+$: {
+  if (showTransformDialog) {
+    const snapshot = getTransformTargetRowsSnapshot({ allowFallback: true });
+    const filteredCount = filteredRows.length;
+    const hasContext = hasFilterContext();
+    dialogTargetRows = snapshot;
+    dialogTargetIsFiltered =
+      hasContext || (snapshot.length > 0 && data ? snapshot.length !== data.rows.length : false);
+    dialogTargetFilteredEmpty = hasContext && filteredCount === 0;
+  } else {
+    dialogTargetRows = [];
+    dialogTargetIsFiltered = false;
+    dialogTargetFilteredEmpty = false;
   }
-  
-  export function clearSort() {
-    sortColumn = null;
+}
+
+function handleSort(columnKey: string) {
+  const columnMeta = displayColumnMeta.get(columnKey);
+  if (!columnMeta || columnMeta.kind !== 'scalar') {
+    return;
+  }
+  if (sortColumn === columnKey) {
+    sortDirection = sortDirection === 'asc' ? 'desc' : 'asc';
+  } else {
+    sortColumn = columnKey;
     sortDirection = 'asc';
-    // 정렬 변경 시 필터 상태 캐시 리셋
-    lastFilterState = '';
-    updateStateAndDispatch();
   }
+  // 정렬 변경 시 필터 상태 캐시 리셋
+  lastFilterState = '';
+  updateStateAndDispatch();
+}
 
-  function handleFilter(columnKey: string, value: string) {
-    if (!value.trim()) {
-      activeFilters.delete(columnKey);
-    } else {
-      activeFilters.set(columnKey, value);
-    }
-    // 필터 상태 캐시 리셋 (강제 업데이트)
-    lastFilterState = '';
-    // Map 변경을 reactivity에 알리기 위해 새 참조 생성
-    activeFilters = new Map(activeFilters);
-    updateStateAndDispatch();
-  }
-  
-  export function clearFilter(columnKey?: string) {
-    if (columnKey) {
-      activeFilters.delete(columnKey);
-    } else {
-      activeFilters.clear();
-    }
-    // 필터 상태 캐시 리셋 (강제 업데이트)
-    lastFilterState = '';
-    // Map 변경을 reactivity에 알리기 위해 새 참조 생성
-    activeFilters = new Map(activeFilters);
-    updateStateAndDispatch();
-  }
+export function clearSort() {
+  sortColumn = null;
+  sortDirection = 'asc';
+  // 정렬 변경 시 필터 상태 캐시 리셋
+  lastFilterState = '';
+  updateStateAndDispatch();
+}
 
-  function handleScroll(event: Event) {
-    handleVirtualScroll(event);
+function handleFilter(columnKey: string, value: string) {
+  const parsed = parseFilterValue(value);
+  if (!parsed) {
+    activeFilters.delete(columnKey);
+  } else {
+    activeFilters.set(columnKey, parsed);
   }
+  // 필터 상태 캐시 리셋 (강제 업데이트)
+  lastFilterState = '';
+  // Map 변경을 reactivity에 알리기 위해 새 참조 생성
+  activeFilters = new Map(activeFilters);
+  updateStateAndDispatch();
+  forceVisibleRowsRefresh();
+}
+
+export function clearFilter(columnKey?: string) {
+  if (columnKey) {
+    activeFilters.delete(columnKey);
+  } else {
+    activeFilters.clear();
+  }
+  // 필터 상태 캐시 리셋 (강제 업데이트)
+  lastFilterState = '';
+  // Map 변경을 reactivity에 알리기 위해 새 참조 생성
+  activeFilters = new Map(activeFilters);
+  updateStateAndDispatch();
+}
+
+function handleScroll(event: Event) {
+  handleVirtualScroll(event);
+}
   
 // 필터링된 행이 변경될 때 행 높이/가상 스크롤 상태 갱신
+// updateFilteredRows()에서 이미 recomputeRowMetrics()를 호출하므로
+// 여기서는 rowHeights가 업데이트된 후에만 updateVisibleRows()를 호출
 $: {
   if (filteredRows !== lastFilteredRowsRef) {
-    lastFilteredRowsRef = filteredRows;
+    const currentFilteredRows = filteredRows;
+    lastFilteredRowsRef = currentFilteredRows;
     if (filterUpdateFrame !== null) {
       cancelAnimationFrame(filterUpdateFrame);
     }
     filterUpdateFrame = requestAnimationFrame(() => {
-      arrayDisplayCache.clear();
-      recomputeRowMetrics();
-      updateVisibleRows();
+      // rowHeights가 아직 업데이트되지 않았으면 recomputeRowMetrics() 호출
+      if (rowHeights.length !== currentFilteredRows.length && currentFilteredRows.length > 0) {
+        arrayDisplayCache.clear();
+        recomputeRowMetrics();
+      }
+      // forceVisibleRowsRefresh()가 이미 호출되었을 수 있으므로
+      // visibleRows가 비어있거나 업데이트가 필요한 경우에만 호출
+      if (visibleRows.length === 0 || renderRowCount !== currentFilteredRows.length) {
+        forceVisibleRowsRefresh();
+      } else {
+        updateVisibleRows();
+      }
       filterUpdateFrame = null;
     });
   }
@@ -984,8 +1130,8 @@ function updateOriginalRowIndexMap() {
   
 // 가상 스크롤링: 보이는 행 계산 (최적화)
 
-function updateVisibleRows() {
-  if (!tableContainer || renderRowCount === 0) {
+export function updateVisibleRows() {
+  if (!tableContainer) {
     visibleRows = [];
     visibleStartIndex = 0;
     visibleEndIndex = 0;
@@ -999,14 +1145,42 @@ function updateVisibleRows() {
     return;
   }
 
+  // renderRowCount가 0이면 빈 상태로 설정
+  if (renderRowCount === 0) {
+    visibleRows = [];
+    visibleStartIndex = 0;
+    visibleEndIndex = 0;
+    topSpacerHeight = 0;
+    bottomSpacerHeight = 0;
+    lastRenderRowCount = 0;
+    return;
+  }
+
   if (rowHeights.length !== renderRowCount) {
-    recomputeRowMetrics();
+    if (filteredRows.length > 0) {
+      recomputeRowMetrics();
+      // 재계산 후에도 길이가 맞지 않으면 아직 준비되지 않은 상태
+      if (rowHeights.length !== renderRowCount) {
+        return;
+      }
+    } else {
+      // filteredRows가 비어있으면 초기화
+      visibleRows = [];
+      visibleStartIndex = 0;
+      visibleEndIndex = 0;
+      topSpacerHeight = 0;
+      bottomSpacerHeight = 0;
+      lastRenderRowCount = 0;
+      return;
+    }
   }
 
   const containerRect = tableContainer.getBoundingClientRect();
   const newContainerHeight = containerRect.height;
   const newScrollTop = tableContainer.scrollTop;
 
+  // 스크롤 위치, 컨테이너 높이, 렌더 행 수가 모두 동일하고
+  // visibleRows가 이미 설정되어 있으면 스킵
   if (
     lastScrollTop === newScrollTop &&
     lastContainerHeight === newContainerHeight &&
@@ -1048,16 +1222,19 @@ function updateVisibleRows() {
     bufferedEnd = Math.min(renderRowCount, bufferedStart + 1);
   }
 
-  if (visibleStartIndex === bufferedStart && visibleEndIndex === bufferedEnd && visibleRows.length > 0) {
-    return;
-  }
-
   visibleStartIndex = bufferedStart;
   visibleEndIndex = bufferedEnd;
   visibleRows = filteredRows.slice(visibleStartIndex, visibleEndIndex);
 
   topSpacerHeight = getRowOffsetByIndex(visibleStartIndex);
   bottomSpacerHeight = Math.max(totalTableHeight - getRowOffsetByIndex(visibleEndIndex), 0);
+}
+
+function forceVisibleRowsRefresh() {
+  lastScrollTop = -1;
+  lastContainerHeight = -1;
+  lastRenderRowCount = -1;
+  updateVisibleRows();
 }
 
 function findRowIndexByOffset(offset: number): number {
@@ -1265,6 +1442,7 @@ export function navigateToRow(rowId: string) {
         commitCellEdit();
       } else {
         // 같은 셀을 다시 클릭한 경우 편집 모드 유지
+        event.stopPropagation();
         return;
       }
     }
@@ -1419,11 +1597,29 @@ function toggleChildArrayExpansion(rowId: string, columnKey: string) {
     if (columns.length === 0 || !code.trim()) {
       return;
     }
-
+    const targetRowsSnapshot = getTransformTargetRowsSnapshot({ allowFallback: false });
+    if (targetRowsSnapshot.length === 0) {
+      return;
+    }
+    const targetRowIds = targetRowsSnapshot.map((row) => row.id);
+    const settings = settingsStore.get();
+    const singleVarName = sanitizeVariableIdentifier(settings.transformVariableName, 'a');
+    const arrayVarName = sanitizeVariableIdentifier(settings.transformArrayVariableName, 'list');
     dataStore.update((data) => {
+      const rowMap = new Map<string, Row>();
+      data.rows.forEach((row) => {
+        rowMap.set(row.id, row);
+      });
+      const targetRows = targetRowIds
+        .map((rowId) => rowMap.get(rowId))
+        .filter((row): row is Row => Boolean(row));
+      if (targetRows.length === 0) {
+        return data;
+      }
+
       if (mode === 'array') {
         // 배열 변환 모드: 모든 행의 값을 배열로 수집
-        const allValues = data.rows.map((row) => {
+        const allValues = targetRows.map((row) => {
           if (columns.length === 1) {
             // 단일 열: 값 배열
             return row.cells[columns[0]]?.value;
@@ -1442,62 +1638,58 @@ function toggleChildArrayExpansion(rowId: string, columnKey: string) {
           code,
           allValues,
           undefined,
-          { mode: 'array', columns }
+          { mode: 'array', columns, arrayVariableName: arrayVarName }
         );
 
         if (result.success && Array.isArray(result.result)) {
           const deletedIndexes = result.deletedIndexes || [];
-          const deleteSet = new Set(deletedIndexes);
-          
-          // 삭제되지 않은 행들만 남기기
-          const remainingRows: typeof data.rows = [];
+          const deleteRowIds = new Set<string>();
+          deletedIndexes.forEach((idx) => {
+            const row = targetRows[idx];
+            if (row) {
+              deleteRowIds.add(row.id);
+            }
+          });
           let resultIndex = 0;
-          
-          data.rows.forEach((row, originalIndex) => {
-            if (deleteSet.has(originalIndex)) {
-              // 이 행은 삭제됨
+
+          targetRows.forEach((row) => {
+            if (deleteRowIds.has(row.id)) {
               return;
             }
-            
-            // 결과 배열에서 해당 항목 가져오기
-            if (resultIndex < result.result.length) {
-              const item = result.result[resultIndex];
-              
-              if (columns.length === 1) {
-                // 단일 열: 배열의 각 요소를 해당 열에 적용
-                const cell = row.cells[columns[0]];
-                if (cell) {
-                  // 빈 문자열은 null로 저장
-                  cell.value = item === '' || item === null || item === undefined ? null : item;
-                }
-              } else {
-                // 여러 열: 객체의 각 속성을 해당 열에 적용
-                columns.forEach((colKey) => {
-                  const cell = row.cells[colKey];
-                  if (cell && item && typeof item === 'object' && colKey in item) {
-                    const val = item[colKey];
-                    // 빈 문자열은 null로 저장
-                    cell.value = val === '' || val === null || val === undefined ? null : val;
-                  }
-                });
-              }
-              
-              resultIndex++;
+            if (resultIndex >= result.result.length) {
+              return;
             }
-            
-            remainingRows.push(row);
+            const item = result.result[resultIndex];
+
+            if (columns.length === 1) {
+              const cell = row.cells[columns[0]];
+              if (cell) {
+                cell.value = item === '' || item === null || item === undefined ? null : item;
+              }
+            } else {
+              columns.forEach((colKey) => {
+                const cell = row.cells[colKey];
+                if (cell && item && typeof item === 'object' && colKey in item) {
+                  const val = item[colKey];
+                  cell.value = val === '' || val === null || val === undefined ? null : val;
+                }
+              });
+            }
+
+            resultIndex++;
           });
-          
-          // 행 수 업데이트
-          data.rows = remainingRows;
-          data.metadata.rowCount = data.rows.length;
+
+          if (deleteRowIds.size > 0) {
+            data.rows = data.rows.filter((row) => !deleteRowIds.has(row.id));
+            data.metadata.rowCount = data.rows.length;
+          }
         }
       } else {
         // 단일 값 변환 모드
-        const rowsToDelete: string[] = [];
+        const rowsToDelete = new Set<string>();
         
         columns.forEach((columnKey) => {
-          data.rows.forEach((row) => {
+          targetRows.forEach((row) => {
             const cell = row.cells[columnKey];
             if (cell) {
               // 같은 행의 다른 열 값들을 rowData로 전달 (null 처리)
@@ -1517,13 +1709,13 @@ function toggleChildArrayExpansion(rowId: string, columnKey: string) {
                 code, 
                 cellValue, 
                 cellValue, 
-                { mode: 'single', rowData }
+                { mode: 'single', rowData, singleVariableName: singleVarName }
               );
               
               if (result.success) {
                 // return; (undefined)로 행 삭제 표시
                 if (result.isDelete || result.result === DELETE_MARKER) {
-                  rowsToDelete.push(row.id);
+                  rowsToDelete.add(row.id);
                 } else if (result.result !== undefined) {
                   // 빈 문자열은 null로 저장
                   cell.value = result.result === '' || result.result === null ? null : result.result;
@@ -1535,9 +1727,8 @@ function toggleChildArrayExpansion(rowId: string, columnKey: string) {
         });
         
         // 삭제할 행 제거
-        if (rowsToDelete.length > 0) {
-          const deleteSet = new Set(rowsToDelete);
-          data.rows = data.rows.filter(row => !deleteSet.has(row.id));
+        if (rowsToDelete.size > 0) {
+          data.rows = data.rows.filter(row => !rowsToDelete.has(row.id));
           data.metadata.rowCount = data.rows.length;
         }
       }
@@ -2747,6 +2938,9 @@ $: if (data && displayColumns) {
 <ColumnTransformDialog
   show={showTransformDialog}
   {data}
+  targetRows={dialogTargetRows}
+  targetIsFiltered={dialogTargetIsFiltered}
+  targetFilteredResultEmpty={dialogTargetFilteredEmpty}
   selectedColumns={Array.from(selectedColumns)}
   onApply={handleTransformApply}
   onClose={handleTransformClose}
@@ -2782,6 +2976,7 @@ $: if (data && displayColumns) {
     background: var(--bg-secondary);
     width: fit-content;
     min-width: 100%;
+    border-bottom: 1px solid var(--border);
   }
 
   .table-body {
@@ -2813,7 +3008,7 @@ $: if (data && displayColumns) {
   .header-grid-wrapper {
     width: fit-content;
     max-width: 100%;
-    overflow-y: auto;
+    overflow-y: visible;
   }
 
   .header-grid {
@@ -2843,6 +3038,11 @@ $: if (data && displayColumns) {
     position: relative;
     flex-shrink: 0;
     overflow: visible;
+    
+    &:has(.cell-input.editing) {
+      border: 1px solid var(--accent);
+      background: var(--accent-alpha);
+    }
   }
 
   .header-cell {
@@ -3106,18 +3306,18 @@ $: if (data && displayColumns) {
   .cell-input {
     flex: 1;
     min-width: 0;
-    background: var(--bg-secondary);
+    background: transparent;
     color: var(--text-primary);
     font-size: 0.875rem;
     padding: 0.25rem;
-    border: 1px solid var(--accent);
+    /* border: 1px solid var(--accent); */
     outline: none;
     border-radius: 4px;
     text-overflow: ellipsis;
     white-space: nowrap;
     overflow: hidden;
   }
-
+  
   .cell-input.editing {
     white-space: normal;
     overflow: visible;
@@ -3129,14 +3329,9 @@ $: if (data && displayColumns) {
   }
 
   .image-icon-btn {
-    width: 24px;
-    height: 24px;
     display: flex;
     align-items: center;
     justify-content: center;
-    background: var(--bg-secondary);
-    border: 1px solid var(--border);
-    border-radius: 4px;
     cursor: pointer;
     transition: all 0.2s;
     flex-shrink: 0;
