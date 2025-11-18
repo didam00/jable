@@ -884,12 +884,16 @@ function getArrayEntryFieldValue(entry: any, fieldPath: string[] | undefined): a
         // 캐시를 무효화하고 업데이트 실행
       }
       updateFilteredRows();
+      const filteredRowCount = filteredRows.length;
+      const totalRowCount = data?.rows?.length ?? filteredRowCount;
       dispatch('stateChange', {
         sortColumn,
         sortDirection,
         filters: Object.fromEntries(
           Array.from(activeFilters.entries()).map(([key, filter]) => [key, describeFilterValue(filter)])
         ),
+        filteredRowCount,
+        totalRowCount,
       });
       filterUpdateTimeout = null;
     }, 0); // 다음 틱에서 실행
@@ -1700,7 +1704,7 @@ function toggleChildArrayExpansion(rowId: string, columnKey: string) {
     }
     const targetRowIds = targetRowsSnapshot.map((row) => row.id);
     const settings = settingsStore.get();
-    const singleVarName = sanitizeVariableIdentifier(settings.transformVariableName, 'a');
+    const singleVarName = sanitizeVariableIdentifier(settings.transformVariableName, 'cell');
     const arrayVarName = sanitizeVariableIdentifier(settings.transformArrayVariableName, 'list');
     dataStore.update((data) => {
       const rowMap = new Map<string, Row>();

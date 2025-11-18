@@ -2,21 +2,33 @@
   import { onMount } from 'svelte';
   import { dataStore } from './agents/store';
   import { setupKeyboardShortcuts } from './agents/ui-ux';
-  import { importFile, saveFile, saveFileAs } from './agents/import-export';
+import {
+  importFile,
+  saveFile,
+  saveFileAs,
+  exportFile,
+  prepareEncodingPreview,
+  type ImportOptions,
+  type EncodingPreviewResult,
+} from './agents/import-export';
+import EncodingPreviewDialog from './components/EncodingPreviewDialog.svelte';
+import SaveAsDialog from './components/SaveAsDialog.svelte';
   import TableView from './components/TableView.svelte';
   import Toolbar from './components/Toolbar.svelte';
   // import SearchBar from './components/SearchBar.svelte';
   import StatsPanel from './components/StatsPanel.svelte';
   import Tabs from './components/Tabs.svelte';
-  import ProgressBar from './components/ProgressBar.svelte';
+import ProgressBar from './components/ProgressBar.svelte';
   import SettingsDialog from './components/SettingsDialog.svelte';
   import TitleBar from './components/TitleBar.svelte';
   import ImportChoiceDialog from './components/ImportChoiceDialog.svelte';
-  import SecondaryTabPreview from './components/SecondaryTabPreview.svelte';
-  import { compressToToon, decompressFromToon } from './agents/compression/toon';
+import SecondaryTabPreview from './components/SecondaryTabPreview.svelte';
+import StatusBar from './components/StatusBar.svelte';
+import { compressToToon, decompressFromToon } from './agents/compression/toon';
   import type { TableData } from './agents/store';
   import type { Tab } from './types/tab';
-  import { isTauri } from './utils/isTauri';
+import { isTauri } from './utils/isTauri';
+import { decodePreview, ENCODING_OPTIONS, type EncodingOption, buildFileNameForFormat } from './agents/import-export/encoding';
   import { getRecentFiles, addRecentFile, removeRecentFile, type RecentFile } from './utils/recentFiles';
   import logo from './assets/logo.png';
 
@@ -35,23 +47,67 @@
   let progress = 0;
   let progressMessage = '';
   let showProgress = false;
-  let tableState: {
-    sortColumn: string | null;
-    sortDirection: 'asc' | 'desc';
-    filters: Record<string, string>;
-  } = {
-    sortColumn: null,
-    sortDirection: 'asc',
-    filters: {},
-  };
+let tableState: {
+  sortColumn: string | null;
+  sortDirection: 'asc' | 'desc';
+  filters: Record<string, string>;
+  filteredRowCount: number;
+  totalRowCount: number;
+} = {
+  sortColumn: null,
+  sortDirection: 'asc',
+  filters: {},
+  filteredRowCount: 0,
+  totalRowCount: 0,
+};
   let searchMatchedRowIds: Set<string> = new Set();
   let searchFilteredColumnKeys: string[] | null = null;
+$: searchMatchCount = searchMatchedRowIds ? searchMatchedRowIds.size : 0;
   let showSettings = false;
-  const isTauriApp = isTauri();
-  let recentFiles: RecentFile[] = [];
+const isTauriApp = isTauri();
+let recentFiles: RecentFile[] = [];
+const encodingOptions: EncodingOption[] = ENCODING_OPTIONS;
+let currentEncoding = 'utf-8';
+let canChangeEncoding = false;
   type RawViewComponentType = typeof import('./components/RawView.svelte').default;
   let RawViewComponent: RawViewComponentType | null = null;
   let rawViewLoadPromise: Promise<void> | null = null;
+interface EncodingDialogState {
+  fileName: string;
+  buffer: Uint8Array;
+  detectedEncoding: string | null;
+  detectedConfidence: number;
+  selectedEncoding: string;
+  previewText: string;
+  previewError?: string;
+  isLoadingPreview: boolean;
+}
+interface EncodingSelection {
+  encoding: string;
+  buffer: Uint8Array;
+}
+let encodingDialogOpen = false;
+let encodingDialogState: EncodingDialogState | null = null;
+let encodingDialogResolver: ((value: EncodingSelection | null) => void) | null = null;
+
+interface SaveAsDialogState {
+  format: 'json' | 'csv' | 'xml' | 'toon';
+  fileName: string;
+  directoryPath: string;
+  encoding: string;
+  canBrowseDirectory: boolean;
+}
+
+interface SaveAsSelection {
+  fileName: string;
+  directoryPath: string;
+  encoding: string;
+}
+
+let saveAsDialogOpen = false;
+let saveAsDialogState: SaveAsDialogState | null = null;
+let saveAsDialogResolver: ((value: SaveAsSelection | null) => void) | null = null;
+let lastSaveDirectory = '';
   async function ensureRawViewLoaded() {
     if (RawViewComponent || rawViewLoadPromise) {
       await rawViewLoadPromise;
@@ -71,6 +127,8 @@
     file: File | { path: string; name: string };
     data: TableData;
     format?: 'json' | 'csv' | 'xml' | 'toon';
+    encoding?: string;
+    binarySource?: Uint8Array | null;
   }
 
   let importDialogOpen = false;
@@ -107,6 +165,117 @@
     }
     return JSON.parse(JSON.stringify(tab.data));
   }
+
+function getFileDisplayName(file: File | { path: string; name: string }): string {
+  return file instanceof File ? file.name : file.name;
+}
+
+function isCsvFileName(fileName: string): boolean {
+  return fileName.toLowerCase().endsWith('.csv');
+}
+
+function extractDirectoryPath(filePath?: string | null): string {
+  if (!filePath) {
+    return '';
+  }
+  const normalized = filePath.replace(/\\/g, '/');
+  const index = normalized.lastIndexOf('/');
+  if (index === -1) {
+    return '';
+  }
+  return normalized.slice(0, index);
+}
+
+function updateSaveAsDialogState(patch: Partial<SaveAsDialogState>) {
+  if (!saveAsDialogState) {
+    return;
+  }
+  saveAsDialogState = {
+    ...saveAsDialogState,
+    ...patch,
+  };
+}
+
+function closeSaveAsDialog(selection: SaveAsSelection | null) {
+  saveAsDialogOpen = false;
+  if (selection?.directoryPath) {
+    lastSaveDirectory = selection.directoryPath;
+  }
+  saveAsDialogResolver?.(selection);
+  saveAsDialogResolver = null;
+  saveAsDialogState = null;
+}
+
+function handleSaveAsDialogConfirm() {
+  if (!saveAsDialogState) {
+    closeSaveAsDialog(null);
+    return;
+  }
+  const trimmedName = saveAsDialogState.fileName.trim();
+  if (!trimmedName) {
+    return;
+  }
+  if (saveAsDialogState.canBrowseDirectory && !saveAsDialogState.directoryPath.trim()) {
+    return;
+  }
+  closeSaveAsDialog({
+    fileName: trimmedName,
+    directoryPath: saveAsDialogState.directoryPath.trim(),
+    encoding: saveAsDialogState.encoding,
+  });
+}
+
+function handleSaveAsDialogCancel() {
+  closeSaveAsDialog(null);
+}
+
+function handleSaveAsDialogFileNameChange(event: CustomEvent<{ value: string }>) {
+  updateSaveAsDialogState({ fileName: event.detail.value });
+}
+
+function handleSaveAsDialogEncodingChange(event: CustomEvent<{ value: string }>) {
+  updateSaveAsDialogState({ encoding: event.detail.value });
+}
+
+function handleSaveAsDialogDirectoryChange(event: CustomEvent<{ value: string }>) {
+  updateSaveAsDialogState({ directoryPath: event.detail.value });
+}
+
+async function handleSaveAsDialogBrowse() {
+  if (!isTauriApp || !saveAsDialogState) {
+    return;
+  }
+  try {
+    const dialogModule = await import('@tauri-apps/plugin-dialog');
+    const { open } = dialogModule as any;
+    const selected = await open({
+      directory: true,
+      multiple: false,
+      defaultPath: saveAsDialogState.directoryPath || lastSaveDirectory || undefined,
+    });
+    if (typeof selected === 'string') {
+      updateSaveAsDialogState({ directoryPath: selected });
+    }
+  } catch (error) {
+    console.error('[handleSaveAsDialogBrowse] 디렉토리 선택 실패', error);
+  }
+}
+
+function requestSaveAsOptions(tab: Tab, format: 'json' | 'csv' | 'xml' | 'toon'): Promise<SaveAsSelection | null> {
+  const initialFileName = buildFileNameForFormat(tab.name, format);
+  const initialDirectory = extractDirectoryPath(tab.filePath) || lastSaveDirectory;
+  saveAsDialogState = {
+    format,
+    fileName: initialFileName,
+    directoryPath: initialDirectory,
+    encoding: tab.encoding || 'utf-8',
+    canBrowseDirectory: isTauriApp,
+  };
+  saveAsDialogOpen = true;
+  return new Promise((resolve) => {
+    saveAsDialogResolver = resolve;
+  });
+}
 
   function cloneTableData(table: TableData): TableData {
     return JSON.parse(JSON.stringify(table));
@@ -148,8 +317,27 @@
       }
     }
 
-    const tabId = createNewTab(pending.file, pending.data, pending.format);
+    const tabId = createNewTab(
+      pending.file,
+      pending.data,
+      pending.format,
+      pending.encoding,
+      pending.binarySource ?? null
+    );
     switchToTab(tabId);
+  }
+
+  async function handleClipboardImport(data: TableData) {
+    try {
+      await integrateImportedData({
+        file: { path: '', name: 'clipboard.json' },
+        data,
+        format: 'json',
+      });
+    } catch (error) {
+      console.error('[handleClipboardImport] 붙여넣기 데이터 처리 실패:', error);
+      alert(`붙여넣기 데이터를 불러오지 못했습니다: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
   }
 
   function closeSplitView() {
@@ -295,7 +483,9 @@
   function createNewTab(
     file: File | { path: string; name: string },
     fileData: TableData,
-    fileFormat?: 'json' | 'csv' | 'xml' | 'toon'
+    fileFormat?: 'json' | 'csv' | 'xml' | 'toon',
+    encoding?: string,
+    binarySource?: Uint8Array | null
   ): string {
     const tabId = `tab_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
     const fileName = file instanceof File ? file.name : file.name;
@@ -315,46 +505,24 @@
       throw new Error('유효하지 않은 데이터입니다.');
     }
     
-    // 대용량 데이터는 .toon으로 압축하여 저장
-    let shouldCompress = fileData.rows.length > 1000;
-    let tabData: TableData | string;
-    try {
-      if (shouldCompress) {
-        console.log(`[createNewTab] 압축 시작: ${fileName}`, {
-          rowsCount: fileData.rows.length,
-          columnsCount: fileData.columns.length
-        });
-        tabData = compressToToon(fileData);
-        console.log(`[createNewTab] 압축 성공: ${fileName}`, {
-          compressedLength: typeof tabData === 'string' ? tabData.length : undefined
-        });
-      } else {
-        tabData = JSON.parse(JSON.stringify(fileData));
-      }
-    } catch (compressError) {
-      console.error(`[createNewTab] 압축 실패: ${fileName}`, {
-        error: compressError,
-        errorMessage: compressError instanceof Error ? compressError.message : String(compressError)
-      });
-      // 압축 실패 시 압축하지 않고 저장
-      console.warn(`[createNewTab] 압축 실패, 압축 없이 저장: ${fileName}`);
-      tabData = JSON.parse(JSON.stringify(fileData));
-      shouldCompress = false;
-    }
+    const { payload, compressed } = buildTabDataPayload(fileData);
     
     const newTab: Tab = {
       id: tabId,
       name: fileName,
-      data: tabData,
-      isCompressed: shouldCompress,
+      data: payload,
+      isCompressed: compressed,
       isModified: false,
       file: file,
       filePath: file instanceof File ? undefined : file.path,
       fileFormat: format,
+      encoding: encoding || 'utf-8',
+      binarySource: binarySource || null,
     };
     
     tabs = [...tabs, newTab];
     activeTabId = tabId;
+    updateActiveEncodingState();
     return tabId;
   }
 
@@ -444,6 +612,7 @@
     setTimeout(() => {
       isUpdatingFromTab = false;
     }, 0);
+    updateActiveEncodingState();
   }
 
   async function closeTab(tabId: string) {
@@ -507,90 +676,331 @@
         }, 0);
       }
     }
+    updateActiveEncodingState();
   }
 
-  async function handleFileDrop(file: File | { path: string; name: string }) {
+  async function prepareImportOptions(
+    file: File | { path: string; name: string }
+  ): Promise<ImportOptions | null> {
+    const fileName = getFileDisplayName(file);
+    if (!isCsvFileName(fileName)) {
+      return {};
+    }
+    try {
+      showProgress = true;
+      progress = 10;
+      progressMessage = `${fileName} 미리보기 준비 중...`;
+      const preview = await prepareEncodingPreview(file);
+      showProgress = false;
+      const selection = await requestEncodingSelection(fileName, preview);
+      if (!selection) {
+        return null;
+      }
+      return {
+        encoding: selection.encoding,
+        binarySource: selection.buffer,
+      };
+    } catch (error) {
+      showProgress = false;
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      alert(`인코딩 미리보기를 준비하지 못했습니다: ${message}`);
+      return null;
+    }
+  }
+
+  function requestEncodingSelection(
+    fileName: string,
+    preview: EncodingPreviewResult
+  ): Promise<EncodingSelection | null> {
+    encodingDialogState = {
+      fileName,
+      buffer: preview.buffer,
+      detectedEncoding: preview.detectedEncoding,
+      detectedConfidence: preview.confidence,
+      selectedEncoding: preview.initialEncoding,
+      previewText: preview.previewText ?? '',
+      previewError: preview.previewError,
+      isLoadingPreview: false,
+    };
+    encodingDialogOpen = true;
+    return new Promise((resolve) => {
+      encodingDialogResolver = resolve;
+    });
+  }
+
+  function buildTabDataPayload(fileData: TableData): { payload: TableData | string; compressed: boolean } {
+    let shouldCompress = fileData.rows.length > 1000;
+    let payload: TableData | string;
+    try {
+      if (shouldCompress) {
+        console.log(`[buildTabDataPayload] 압축 시작`, {
+          rowsCount: fileData.rows.length,
+          columnsCount: fileData.columns.length,
+        });
+        payload = compressToToon(fileData);
+      } else {
+        payload = JSON.parse(JSON.stringify(fileData));
+      }
+    } catch (error) {
+      console.error(`[buildTabDataPayload] 압축 실패`, {
+        error,
+        errorMessage: error instanceof Error ? error.message : String(error),
+      });
+      payload = JSON.parse(JSON.stringify(fileData));
+      shouldCompress = false;
+    }
+    return { payload, compressed: shouldCompress };
+  }
+
+  function updateActiveEncodingState() {
+    if (!activeTabId) {
+      currentEncoding = 'utf-8';
+      canChangeEncoding = false;
+      return;
+    }
+    const activeTab = tabs.find((tab) => tab.id === activeTabId);
+    if (!activeTab) {
+      currentEncoding = 'utf-8';
+      canChangeEncoding = false;
+      return;
+    }
+    currentEncoding = (activeTab.encoding || 'utf-8').toLowerCase();
+    canChangeEncoding = activeTab.fileFormat === 'csv' && Boolean(activeTab.binarySource);
+  }
+
+  function closeEncodingDialog(result: EncodingSelection | null) {
+    encodingDialogOpen = false;
+    const resolver = encodingDialogResolver;
+    encodingDialogResolver = null;
+    encodingDialogState = null;
+    resolver?.(result);
+  }
+
+  function handleEncodingDialogConfirm() {
+    if (!encodingDialogState) {
+      closeEncodingDialog(null);
+      return;
+    }
+    closeEncodingDialog({
+      encoding: encodingDialogState.selectedEncoding,
+      buffer: encodingDialogState.buffer,
+    });
+  }
+
+  function handleEncodingDialogCancel() {
+    closeEncodingDialog(null);
+  }
+
+  function handleEncodingDialogEncodingChange(
+    event: CustomEvent<{ encoding: string }>
+  ) {
+    if (!encodingDialogState) {
+      return;
+    }
+    const nextEncoding = event.detail.encoding;
+    encodingDialogState = {
+      ...encodingDialogState,
+      selectedEncoding: nextEncoding,
+      isLoadingPreview: true,
+      previewError: undefined,
+    };
+    const buffer = encodingDialogState.buffer;
+    try {
+      const previewText = decodePreview(buffer, nextEncoding);
+      encodingDialogState = {
+        ...encodingDialogState,
+        previewText,
+        isLoadingPreview: false,
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      encodingDialogState = {
+        ...encodingDialogState,
+        previewError: message,
+        isLoadingPreview: false,
+      };
+    }
+  }
+
+  async function handleEncodingChangeRequest(newEncoding: string) {
+    if (!activeTabId) {
+      return;
+    }
+    const tab = tabs.find((t) => t.id === activeTabId);
+    if (!tab || tab.fileFormat !== 'csv' || !tab.binarySource) {
+      alert('이 탭에서는 인코딩을 변경할 수 없습니다.');
+      return;
+    }
+    if (!newEncoding || tab.encoding === newEncoding) {
+      return;
+    }
     try {
       showProgress = true;
       progress = 0;
-      progressMessage = '파일 읽는 중...';
-      
-      const result = await importFile(file, (prog, msg) => {
-        progress = prog;
-        progressMessage = msg;
-      });
-      
-      // 데이터 유효성 검사
+      progressMessage = `${tab.name} 인코딩 변경 중...`;
+      const fileRef = tab.file ?? (tab.filePath ? { path: tab.filePath, name: tab.name } : { path: '', name: tab.name });
+      const result = await importFile(
+        fileRef,
+        (prog, msg) => {
+          progress = prog;
+          progressMessage = `${tab.name}: ${msg}`;
+        },
+        { encoding: newEncoding, binarySource: tab.binarySource }
+      );
+      const { payload, compressed } = buildTabDataPayload(result.data);
+      tab.data = payload;
+      tab.isCompressed = compressed;
+      tab.encoding = newEncoding;
+      tab.fileFormat = result.format;
+      tab.isModified = false;
+      tabs = [...tabs];
+      isUpdatingFromTab = true;
+      dataStore.setCurrentTab(tab.id);
+      dataStore.restoreTabHistory([{
+        data: JSON.parse(JSON.stringify(result.data)),
+        timestamp: Date.now(),
+      }], 0);
+      dataStore.set(result.data, true);
+      setTimeout(() => {
+        isUpdatingFromTab = false;
+      }, 0);
+      currentEncoding = newEncoding;
+      updateActiveEncodingState();
+      showProgress = false;
+    } catch (error) {
+      showProgress = false;
+      alert(`인코딩 변경 실패: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+  }
+
+  async function processInputFile(
+    file: File | { path: string; name: string }
+  ): Promise<boolean> {
+    const importOptions = await prepareImportOptions(file);
+    if (importOptions === null) {
+      return false;
+    }
+    try {
+      const fileName = getFileDisplayName(file);
+      showProgress = true;
+      progress = 0;
+      progressMessage = `${fileName} 읽는 중...`;
+      const result = await importFile(
+        file,
+        (prog, msg) => {
+          progress = prog;
+          progressMessage = `${fileName}: ${msg}`;
+        },
+        importOptions
+      );
       if (!result || !result.data) {
         throw new Error('파일 데이터를 읽을 수 없습니다.');
       }
-      
       if (!result.data.rows || !Array.isArray(result.data.rows)) {
         throw new Error('유효하지 않은 데이터 형식입니다.');
       }
-      
-      await integrateImportedData({ file, data: result.data, format: result.format });
-      
-      // Tauri 환경에서 파일 경로가 있으면 최근 파일 목록에 추가
-      if (isTauriApp && 'path' in file && file.path) {
-        addRecentFile(file.path, file.name);
-        recentFiles = getRecentFiles(); // reactive 업데이트
-      }
-      
-      showProgress = false;
-    } catch (error) {
-      showProgress = false;
-      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-      console.error('[handleFileDrop] 파일 읽기 실패:', {
-        error,
-        errorMessage,
-        errorStack: error instanceof Error ? error.stack : undefined
+      await integrateImportedData({
+        file,
+        data: result.data,
+        format: result.format,
+        encoding: result.encoding,
+        binarySource: importOptions?.binarySource ?? result.binarySource ?? null,
       });
-      alert(errorMessage);
-    }
-  }
-
-  async function handleSave() {
-    if (!activeTabId) return;
-
-    const tab = tabs.find(t => t.id === activeTabId);
-    if (!tab) return;
-
-    try {
-      // 탭 데이터를 TableData로 변환
-      let tabData: TableData;
-      if (tab.isCompressed && typeof tab.data === 'string') {
-        tabData = decompressFromToon(tab.data);
-      } else {
-        tabData = typeof tab.data === 'string' 
-          ? JSON.parse(tab.data) 
-          : tab.data;
-      }
-
-      if (tab.filePath && tab.fileFormat) {
-        // 원본 파일에 저장
-        const result = await saveFile(tabData, tab.filePath, tab.fileFormat);
-        if (result.saved) {
-          tab.isModified = false;
-          tabs = tabs; // Svelte reactivity
-        }
-      } else {
-        // Save As
-        const format = tab.fileFormat || 'json';
-        const result = await saveFileAs(tabData, format, tab.name);
-        if (result.saved && result.filePath) {
-          tab.filePath = result.filePath;
-          tab.isModified = false;
-          // 파일명 업데이트
-          const fileName = result.filePath.split(/[/\\]/).pop() || tab.name;
-          tab.name = fileName;
-          tabs = tabs; // Svelte reactivity
-        }
-      }
+      showProgress = false;
+      return true;
     } catch (error) {
-      alert(`저장 실패: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      showProgress = false;
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      console.error('[processInputFile] 파일 처리 실패:', {
+        file: getFileDisplayName(file),
+        error,
+      });
+      alert(message);
+      return false;
     }
   }
+
+  async function handleFileDrop(file: File | { path: string; name: string }) {
+    const succeeded = await processInputFile(file);
+    if (
+      succeeded &&
+      isTauriApp &&
+      'path' in file &&
+      file.path
+    ) {
+      addRecentFile(file.path, file.name);
+      recentFiles = getRecentFiles();
+    }
+  }
+
+async function saveTabAs(tab: Tab, tabData: TableData): Promise<boolean> {
+  const format = tab.fileFormat || 'json';
+  const selection = await requestSaveAsOptions(tab, format);
+  if (!selection) {
+    return false;
+  }
+  try {
+    const result = await saveFileAs(tabData, format, {
+      defaultFileName: selection.fileName,
+      directoryPath: selection.directoryPath || undefined,
+      encoding: selection.encoding,
+    });
+    if (result.saved) {
+      if (result.filePath) {
+        tab.filePath = result.filePath;
+        const fileName = result.filePath.split(/[/\\]/).pop() || tab.name;
+        tab.name = fileName;
+        if (isTauriApp) {
+          addRecentFile(result.filePath, tab.name);
+          recentFiles = getRecentFiles();
+        }
+      } else {
+        tab.name = buildFileNameForFormat(selection.fileName, format);
+      }
+      tab.fileFormat = format;
+      tab.encoding = selection.encoding;
+      tab.isModified = false;
+      tabs = tabs;
+      return true;
+    }
+  } catch (error) {
+    alert(`저장 실패: ${error instanceof Error ? error.message : 'Unknown error'}`);
+  }
+  return false;
+}
+
+async function handleSave() {
+  if (!activeTabId) return;
+
+  const tab = tabs.find((t) => t.id === activeTabId);
+  if (!tab) return;
+
+  try {
+    let tabData: TableData;
+    if (tab.isCompressed && typeof tab.data === 'string') {
+      tabData = decompressFromToon(tab.data);
+    } else {
+      tabData = typeof tab.data === 'string'
+        ? JSON.parse(tab.data)
+        : tab.data;
+    }
+
+    if (!tab.filePath || !tab.fileFormat) {
+      await saveTabAs(tab, tabData);
+      return;
+    }
+
+    const result = await saveFile(tabData, tab.filePath, tab.fileFormat, {
+      encoding: tab.encoding,
+    });
+    if (result.saved) {
+      tab.isModified = false;
+      tabs = tabs;
+    }
+  } catch (error) {
+    alert(`저장 실패: ${error instanceof Error ? error.message : 'Unknown error'}`);
+  }
+}
 
   async function handleSaveAs() {
     if (!activeTabId) return;
@@ -609,23 +1019,22 @@
           : tab.data;
       }
 
-      const format = tab.fileFormat || 'json';
-      const result = await saveFileAs(tabData, format, tab.name);
-      if (result.saved && result.filePath) {
-        tab.filePath = result.filePath;
-        tab.isModified = false;
-        // 파일명 업데이트
-        const fileName = result.filePath.split(/[/\\]/).pop() || tab.name;
-        tab.name = fileName;
-        tabs = tabs; // Svelte reactivity
-        // 최근 파일 목록에 추가
-        if (isTauriApp) {
-          addRecentFile(result.filePath, fileName);
-          recentFiles = getRecentFiles();
-        }
-      }
+    await saveTabAs(tab, tabData);
     } catch (error) {
       alert(`저장 실패: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+  }
+
+  async function handleExport(format: 'json' | 'csv' | 'xml' | 'toon') {
+    try {
+      const dataToExport = dataStore.getCurrentData();
+      const activeTab = activeTabId ? tabs.find((tab) => tab.id === activeTabId) : null;
+    await exportFile(dataToExport, format, {
+      defaultFileName: activeTab?.name,
+      encoding: activeTab?.encoding,
+    });
+    } catch (error) {
+      alert(`내보내기 실패: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   }
 
@@ -661,30 +1070,7 @@
         const fileName = file.name.toLowerCase();
         console.log('[handleDrop] 파일 처리:', { name: file.name, size: file.size });
         if (fileName.endsWith('.json') || fileName.endsWith('.csv') || fileName.endsWith('.xml') || fileName.endsWith('.toon')) {
-          try {
-            showProgress = true;
-            progress = 0;
-            progressMessage = `${file.name} 읽는 중...`;
-            
-            const result = await importFile(file, (prog, msg) => {
-              progress = prog;
-              progressMessage = `${file.name}: ${msg}`;
-            });
-            
-            await integrateImportedData({ file, data: result.data, format: result.format });
-            
-            showProgress = false;
-          } catch (error) {
-            showProgress = false;
-            const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-            console.error('[handleDrop] 파일 읽기 실패:', {
-              fileName: file.name,
-              error,
-              errorMessage,
-              errorStack: error instanceof Error ? error.stack : undefined
-            });
-            alert(`${file.name}: ${errorMessage}`);
-          }
+          await processInputFile(file);
         }
       }
     } else if (isTauri()) {
@@ -711,30 +1097,7 @@
                 
                 const fileName = file.name.toLowerCase();
                 if (fileName.endsWith('.json') || fileName.endsWith('.csv') || fileName.endsWith('.xml') || fileName.endsWith('.toon')) {
-                  try {
-                    showProgress = true;
-                    progress = 0;
-                    progressMessage = `${file.name} 읽는 중...`;
-                    
-                    const result = await importFile(file, (prog, msg) => {
-                      progress = prog;
-                      progressMessage = `${file.name}: ${msg}`;
-                    });
-                    
-                    await integrateImportedData({ file, data: result.data, format: result.format });
-                    
-                    showProgress = false;
-                  } catch (error) {
-                    showProgress = false;
-                    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-                    console.error('[handleDrop] 파일 읽기 실패:', {
-                      fileName: file.name,
-                      error,
-                      errorMessage,
-                      errorStack: error instanceof Error ? error.stack : undefined
-                    });
-                    alert(`${file.name}: ${errorMessage}`);
-                  }
+              await processInputFile(file);
                 }
               } else {
                 console.warn('[handleDrop] entry가 파일이 아님:', entry);
@@ -773,6 +1136,7 @@
     on:createEmpty={createEmptyTab}
     on:save={handleSave}
     on:saveAs={handleSaveAs}
+    on:export={(e) => handleExport(e.detail.format)}
     on:searchChange={(e) => {
       searchMatchedRowIds = e.detail.matchedRowIds;
       searchFilteredColumnKeys = e.detail.filteredColumnKeys;
@@ -780,6 +1144,7 @@
     on:openSettings={() => {
       showSettings = true;
     }}
+    on:pasteImport={(e) => handleClipboardImport(e.detail.data)}
   />
   {#if tabs.length > 0}
     <Tabs 
@@ -915,6 +1280,45 @@
     fileName={importDialogFileName}
     canMerge={importDialogCanMerge}
     on:select={handleImportDialogSelect}
+  />
+  <EncodingPreviewDialog
+    open={encodingDialogOpen}
+    fileName={encodingDialogState?.fileName ?? ''}
+    options={encodingOptions}
+    detectedEncoding={encodingDialogState?.detectedEncoding ?? null}
+    detectedConfidence={encodingDialogState?.detectedConfidence ?? 0}
+    selectedEncoding={encodingDialogState?.selectedEncoding ?? 'utf-8'}
+    previewText={encodingDialogState?.previewText ?? ''}
+    isLoading={encodingDialogState?.isLoadingPreview ?? false}
+    errorMessage={encodingDialogState?.previewError}
+    on:changeEncoding={handleEncodingDialogEncodingChange}
+    on:confirm={handleEncodingDialogConfirm}
+    on:cancel={handleEncodingDialogCancel}
+  />
+  <SaveAsDialog
+    open={saveAsDialogOpen}
+    fileName={saveAsDialogState?.fileName ?? ''}
+    directoryPath={saveAsDialogState?.directoryPath ?? ''}
+    encoding={saveAsDialogState?.encoding ?? 'utf-8'}
+    format={saveAsDialogState?.format ?? 'json'}
+    encodingOptions={encodingOptions}
+    canBrowseDirectory={saveAsDialogState?.canBrowseDirectory ?? false}
+    on:changeFileName={handleSaveAsDialogFileNameChange}
+    on:changeEncoding={handleSaveAsDialogEncodingChange}
+    on:changeDirectory={handleSaveAsDialogDirectoryChange}
+    on:browseDirectory={handleSaveAsDialogBrowse}
+    on:confirm={handleSaveAsDialogConfirm}
+    on:cancel={handleSaveAsDialogCancel}
+  />
+  <StatusBar
+    encoding={currentEncoding}
+    options={encodingOptions}
+    canChangeEncoding={canChangeEncoding}
+    filteredRows={tableState.filteredRowCount}
+    totalRows={tableState.totalRowCount || data.metadata.rowCount}
+    searchCount={searchMatchCount}
+    hasData={data.rows.length > 0 || data.columns.length > 0}
+    on:changeEncoding={(e) => handleEncodingChangeRequest(e.detail.encoding)}
   />
 </div>
 

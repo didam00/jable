@@ -28,6 +28,9 @@
     "@tauri-apps/plugin-dialog": "^2.0.0",
     "@tauri-apps/plugin-fs": "^2.0.0",
     "@toon-format/toon": "^1.0.0",
+    "buffer": "^6.0.3",
+    "iconv-lite": "^0.7.0",
+    "jschardet": "^3.1.4",
     "papaparse": "^5.4.1"
   }
 }

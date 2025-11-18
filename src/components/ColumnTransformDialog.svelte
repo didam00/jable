@@ -52,7 +52,7 @@
 
   function getVariableNames() {
     return {
-      single: getValidIdentifier(appSettings?.transformVariableName, 'a'),
+      single: getValidIdentifier(appSettings?.transformVariableName, 'cell'),
       array: getValidIdentifier(appSettings?.transformArrayVariableName, 'list'),
     };
   }

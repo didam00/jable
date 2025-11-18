@@ -89,6 +89,18 @@
     if (!data || data.columns.length === 0) {
       return null;
     }
+
+    if (parsed.type === 'logicalGroup' && parsed.subQueries) {
+      const aggregated: string[] = [];
+      parsed.subQueries.forEach(sub => {
+        const subKeys = resolveFilteredColumns(sub);
+        if (subKeys) {
+          aggregated.push(...subKeys);
+        }
+      });
+      const unique = Array.from(new Set(aggregated));
+      return unique.length > 0 ? unique : null;
+    }
     
     if (parsed.type === 'columnFilter') {
       const keys: string[] = [];

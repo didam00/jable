@@ -1,6 +1,7 @@
 /**
  * 데이터 파서 Agent - 핵심 파싱 로직
  */
+import Papa from 'papaparse';
 import type { TableData, Column, Row, Cell } from '../store/types';
 
 export interface ProgressDetails {
@@ -102,14 +103,20 @@ export function parseJSON(jsonString: string, onProgress?: ProgressCallback): Ta
   }
 }
 
-export function parseCSV(_: string, onProgress?: ProgressCallback): TableData {
+export function parseCSV(csvString: string, onProgress?: ProgressCallback): TableData {
   try {
     onProgress?.(5, 'CSV 파싱 준비 중...');
-    
-    const rows: Row[] = [];
-    let columns: Column[] = [];
-
-    if (rows.length === 0) {
+    const sanitized = csvString.replace(/^\uFEFF/, '');
+    const parsingResult = Papa.parse<string[]>(sanitized, {
+      skipEmptyLines: 'greedy',
+    });
+    if (parsingResult.errors.length > 0) {
+      const firstError = parsingResult.errors[0];
+      const rowInfo = firstError.row !== undefined ? ` (row ${firstError.row})` : '';
+      throw new Error(`${firstError.message}${rowInfo}`);
+    }
+    const parsedRows = parsingResult.data.filter((row) => row && row.length > 0);
+    if (parsedRows.length === 0) {
       onProgress?.(100, '완료');
       return {
         columns: [],
@@ -117,10 +124,41 @@ export function parseCSV(_: string, onProgress?: ProgressCallback): TableData {
         metadata: { rowCount: 0, columnCount: 0, isFlat: true },
       };
     }
-
+    const header = [...parsedRows[0]];
+    const maxColumnLength = parsedRows.reduce((max, row) => Math.max(max, row.length), header.length);
+    if (header.length < maxColumnLength) {
+      for (let index = header.length; index < maxColumnLength; index++) {
+        header[index] = `column_${index + 1}`;
+      }
+    }
+    if (header[0]) {
+      header[0] = header[0].replace(/^\uFEFF/, '');
+    }
+    const columns = buildCsvColumns(header);
+    const rows: Row[] = [];
+    const totalDataRows = parsedRows.length - 1;
+    const batchSize = Math.max(100, Math.floor(totalDataRows / 100) || 1);
+    for (let rowIndex = 1; rowIndex < parsedRows.length; rowIndex++) {
+      const sourceRow = parsedRows[rowIndex];
+      const cells: Record<string, Cell> = {};
+      columns.forEach((column, columnIndex) => {
+        const rawValue = sourceRow[columnIndex] ?? '';
+        cells[column.key] = inferCsvCell(rawValue);
+      });
+      rows.push({
+        id: `row_${rowIndex - 1}`,
+        cells,
+      });
+      if (totalDataRows > 0) {
+        const processed = rowIndex;
+        if ((processed % batchSize === 0) || processed === parsedRows.length - 1) {
+          const progress = 20 + ((processed - 1) / totalDataRows) * 70;
+          onProgress?.(progress, `행 처리 중: ${processed.toLocaleString()} / ${parsedRows.length - 1}`);
+        }
+      }
+    }
     onProgress?.(95, '데이터 정리 중...');
-    
-    const finalResult = {
+    const result: TableData = {
       columns,
       rows,
       metadata: {
@@ -129,12 +167,67 @@ export function parseCSV(_: string, onProgress?: ProgressCallback): TableData {
         isFlat: true,
       },
     };
-    
     onProgress?.(100, '완료');
-    return finalResult;
+    return result;
   } catch (e) {
     throw new Error(`CSV 파싱 실패: ${e instanceof Error ? e.message : 'Unknown error'}`);
   }
+}
+
+function buildCsvColumns(header: string[]): Column[] {
+  const usedKeys = new Set<string>();
+  return header.map((raw, index) => {
+    const base = (raw ?? '').trim() || `column_${index + 1}`;
+    let key = base;
+    let counter = 1;
+    while (usedKeys.has(key)) {
+      key = `${base}_${counter}`;
+      counter++;
+    }
+    usedKeys.add(key);
+    return {
+      key,
+      label: base,
+      type: 'string',
+    };
+  });
+}
+
+function inferCsvCell(rawValue: string): Cell {
+  const original = rawValue ?? '';
+  const trimmed = original.trim();
+  if (trimmed.length === 0) {
+    return { value: '', type: 'string' };
+  }
+  const lower = trimmed.toLowerCase();
+  if (lower === 'true' || lower === 'false') {
+    return { value: lower === 'true', type: 'boolean' };
+  }
+  if (lower === 'null') {
+    return { value: null, type: 'null' };
+  }
+  if (isNumericValue(trimmed)) {
+    return { value: Number(trimmed), type: 'number' };
+  }
+  return { value: original, type: 'string' };
+}
+
+function isNumericValue(value: string): boolean {
+  if (!/^[-+]?\d+(\.\d+)?([eE][-+]?\d+)?$/.test(value)) {
+    return false;
+  }
+  if (
+    value.startsWith('0') &&
+    value.length > 1 &&
+    !value.startsWith('0.') &&
+    !value.startsWith('0e') &&
+    !value.startsWith('0E') &&
+    !value.startsWith('-0') &&
+    !value.startsWith('+0')
+  ) {
+    return false;
+  }
+  return true;
 }
 
 function convertToTableData(data: any, onProgress?: ProgressCallback): TableData {

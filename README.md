@@ -12,7 +12,7 @@
 [![Vite](https://img.shields.io/badge/Vite-5.0-purple.svg)](https://vitejs.dev/)
 
 
-![screenshot1](./screenshot-1.png)
+<img src="./screenshot-1.png" style="border-radius: 10px">
 
 🌐 **[라이브 데모](https://didam00.github.io/jable/)** | 📖 **[문서](#-사용-방법)** | 🚀 **[시작하기](#-개발)**
 
@@ -56,7 +56,7 @@
 - ⚡ **실시간 필터링** - 입력 즉시 결과 반영
 - 📐 **자동 크기 조정** - 열 너비에 맞춰 필터 창 표시
 
-![screenshot1](./screenshot-2.png)
+<img src="./screenshot-2.png" style="border-radius: 10px">
 
 ---
 
@@ -73,7 +73,7 @@
 | `Esc` | 검색창 닫기 |
 | `Enter` | 셀 편집 시 다음 행으로 이동 |
 | `Shift+Enter` | 셀 편집 시 이전 행으로 이동 |
-| `Tab` | 셀 편집 시 다음 열로 이동 |
+| `Tab` | 셀 편집 시 다음 열로 이동 |****
 | `Shift+Tab` | 셀 편집 시 이전 열로 이동 |
 
 ---
@@ -170,7 +170,7 @@ column>number&column<number  // 복합 조건
 - 예: `price>100` - price 열에서 100보다 큰 값 검색
 - 예: `age>18&age<65` - age 열에서 18보다 크고 65보다 작은 값 검색
   
-![screenshot1](./screenshot-4.png)
+<img src="./screenshot-4.png" style="border-radius: 10px">
 
 ### 4️⃣ 행 필터링
 ```javascript
@@ -204,7 +204,7 @@ column>number&column<number  // 복합 조건
 - 예: `::name` - name 열만 표시
 - 예: `::2` - 2번째 열만 표시
 
-![screenshot1](./screenshot-5.png)
+<img src="./screenshot-5.png" style="border-radius: 10px">
 
 ### 💡 검색 문법 예제
 
@@ -579,3 +579,4 @@ src/
 Made with ❤️ using [Cursor](https://cursor.sh/)
 
 </div>
+****

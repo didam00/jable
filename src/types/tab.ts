@@ -14,6 +14,8 @@ export interface Tab {
   file?: File | { path: string; name: string } | null;
   filePath?: string; // Tauri 환경에서 파일 경로 저장
   fileFormat?: 'json' | 'csv' | 'xml' | 'toon'; // 원본 파일 형식 저장
+  encoding?: string;
+  binarySource?: Uint8Array | null;
   history?: HistoryState[]; // 탭별 히스토리
   historyIndex?: number; // 현재 히스토리 인덱스
 }

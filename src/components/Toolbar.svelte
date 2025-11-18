@@ -1,7 +1,8 @@
 <script lang="ts">
   import { createEventDispatcher } from 'svelte';
   import { dataStore } from '../agents/store';
-  import { importFromClipboard, exportFile } from '../agents/import-export';
+  import type { TableData } from '../agents/store';
+  import { importFromClipboard } from '../agents/import-export';
   import { isTauri } from '../utils/isTauri';
   import SearchBar from './SearchBar.svelte';
 
@@ -12,6 +13,8 @@
     saveAs: void;
     searchChange: { matchedRowIds: Set<string>; filteredColumnKeys: string[] | null };
     openSettings: void;
+    export: { format: 'json' | 'csv' | 'xml' | 'toon' };
+    pasteImport: { data: TableData };
   }>();
 
   let fileInput: HTMLInputElement;
@@ -90,22 +93,15 @@
     isMenuOpen = false;
     try {
       const data = await importFromClipboard();
-      // 붙여넣기는 현재 활성 탭에 추가하거나 새 탭 생성하지 않음 (기존 동작 유지)
-      dataStore.set(data);
+      dispatch('pasteImport', { data });
     } catch (error) {
       alert(`붙여넣기 실패: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   }
 
-  async function handleExport(format: 'json' | 'csv' | 'xml' | 'toon') {
+  function handleExport(format: 'json' | 'csv' | 'xml' | 'toon') {
     isMenuOpen = false;
-    dataStore.subscribe(async (data) => {
-      try {
-        await exportFile(data, format);
-      } catch (error) {
-        alert(`내보내기 실패: ${error instanceof Error ? error.message : 'Unknown error'}`);
-      }
-    })();
+    dispatch('export', { format });
   }
 
   function handleUndo() {

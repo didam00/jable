@@ -26,7 +26,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   maxChildArray: -1,
   maxHeaderRows: -1,
   rowHeight: 32,
-  transformVariableName: 'a',
+  transformVariableName: 'cell',
   transformArrayVariableName: 'list',
 };
 

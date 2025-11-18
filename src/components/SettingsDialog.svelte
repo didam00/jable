@@ -14,7 +14,7 @@
     maxChildArray: -1,
     maxHeaderRows: -1,
     rowHeight: 32,
-    transformVariableName: 'a',
+    transformVariableName: 'cell',
     transformArrayVariableName: 'list',
   };
 
@@ -31,7 +31,7 @@
   }
 
   function handleSave() {
-    settings.transformVariableName = sanitizeVarName(settings.transformVariableName, 'a');
+    settings.transformVariableName = sanitizeVarName(settings.transformVariableName, 'cell');
     settings.transformArrayVariableName = sanitizeVarName(settings.transformArrayVariableName, 'list');
     settingsStore.set(settings);
     onClose();

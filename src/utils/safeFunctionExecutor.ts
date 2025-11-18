@@ -167,6 +167,238 @@ function preserveType(originalValue: any, newValue: any): any {
   return newValue;
 }
 
+interface ColumnReferenceToken {
+  start: number;
+  end: number;
+  identifier: string;
+}
+
+interface ColumnResolution {
+  columnKey: string;
+  remainder: string;
+}
+
+function extractColumnReferenceTokens(code: string): ColumnReferenceToken[] {
+  const tokens: ColumnReferenceToken[] = [];
+  const templateStack: Array<{ braceDepthStack: number[] }> = [];
+  let inSingleQuote = false;
+  let inDoubleQuote = false;
+  let inLineComment = false;
+  let inBlockComment = false;
+  let index = 0;
+
+  while (index < code.length) {
+    const char = code[index];
+    const next = code[index + 1];
+    const currentTemplate = templateStack[templateStack.length - 1];
+
+    if (inLineComment) {
+      if (char === '\n') {
+        inLineComment = false;
+      }
+      index += 1;
+      continue;
+    }
+
+    if (inBlockComment) {
+      if (char === '*' && next === '/') {
+        inBlockComment = false;
+        index += 2;
+        continue;
+      }
+      index += 1;
+      continue;
+    }
+
+    if (inSingleQuote) {
+      if (char === '\\') {
+        index += 2;
+        continue;
+      }
+      if (char === '\'') {
+        inSingleQuote = false;
+      }
+      index += 1;
+      continue;
+    }
+
+    if (inDoubleQuote) {
+      if (char === '\\') {
+        index += 2;
+        continue;
+      }
+      if (char === '"') {
+        inDoubleQuote = false;
+      }
+      index += 1;
+      continue;
+    }
+
+    if (currentTemplate && currentTemplate.braceDepthStack.length === 0) {
+      if (char === '`') {
+        templateStack.pop();
+        index += 1;
+        continue;
+      }
+      if (char === '\\') {
+        index += 2;
+        continue;
+      }
+      if (char === '$' && next === '{') {
+        currentTemplate.braceDepthStack.push(0);
+        index += 2;
+        continue;
+      }
+      index += 1;
+      continue;
+    }
+
+    if (currentTemplate && currentTemplate.braceDepthStack.length > 0) {
+      if (char === '{') {
+        currentTemplate.braceDepthStack[currentTemplate.braceDepthStack.length - 1] += 1;
+        index += 1;
+        continue;
+      }
+      if (char === '}') {
+        const depthIndex = currentTemplate.braceDepthStack.length - 1;
+        if (currentTemplate.braceDepthStack[depthIndex] === 0) {
+          currentTemplate.braceDepthStack.pop();
+        } else {
+          currentTemplate.braceDepthStack[depthIndex] -= 1;
+        }
+        index += 1;
+        continue;
+      }
+      if (char === '$' && next === '{') {
+        currentTemplate.braceDepthStack.push(0);
+        index += 2;
+        continue;
+      }
+    }
+
+    if (char === '`') {
+      templateStack.push({ braceDepthStack: [] });
+      index += 1;
+      continue;
+    }
+
+    if (char === '/' && next === '/') {
+      inLineComment = true;
+      index += 2;
+      continue;
+    }
+
+    if (char === '/' && next === '*') {
+      inBlockComment = true;
+      index += 2;
+      continue;
+    }
+
+    if (char === '\'') {
+      inSingleQuote = true;
+      index += 1;
+      continue;
+    }
+
+    if (char === '"') {
+      inDoubleQuote = true;
+      index += 1;
+      continue;
+    }
+
+    if (char === '$' && next && /[A-Za-z_]/.test(next)) {
+      let end = index + 2;
+      while (end < code.length && /[A-Za-z0-9_.]/.test(code[end])) {
+        end += 1;
+      }
+      const identifier = code.slice(index + 1, end);
+      tokens.push({ start: index, end, identifier });
+      index = end;
+      continue;
+    }
+
+    index += 1;
+  }
+
+  return tokens;
+}
+
+function resolveColumnReference(
+  reference: string,
+  availableColumns: Set<string>
+): ColumnResolution | null {
+  if (availableColumns.has(reference)) {
+    return { columnKey: reference, remainder: '' };
+  }
+
+  const segments = reference.split('.');
+  for (let i = segments.length - 1; i >= 1; i -= 1) {
+    const candidate = segments.slice(0, i).join('.');
+    if (availableColumns.has(candidate)) {
+      const remainderSegments = segments.slice(i);
+      const remainder = remainderSegments.length > 0 ? `.${remainderSegments.join('.')}` : '';
+      return { columnKey: candidate, remainder };
+    }
+  }
+
+  return null;
+}
+
+interface ProcessedCodeResult {
+  code: string;
+  hasColumnReference: boolean;
+  error?: string;
+}
+
+function processColumnReferences(
+  code: string,
+  rowData: Record<string, unknown>
+): ProcessedCodeResult {
+  const tokens = extractColumnReferenceTokens(code);
+  if (tokens.length === 0) {
+    return {
+      code,
+      hasColumnReference: false,
+    };
+  }
+
+  const availableColumns = new Set(Object.keys(rowData));
+  const parts: string[] = [];
+  let lastIndex = 0;
+
+  for (const token of tokens) {
+    const resolved = resolveColumnReference(token.identifier, availableColumns);
+    if (!resolved) {
+      return {
+        code,
+        hasColumnReference: false,
+        error: `${token.identifier} 열을 찾을 수 없습니다`,
+      };
+    }
+    parts.push(code.slice(lastIndex, token.start));
+    parts.push(
+      `__accessColumn(${JSON.stringify(resolved.columnKey)})${resolved.remainder}`
+    );
+    lastIndex = token.end;
+  }
+
+  parts.push(code.slice(lastIndex));
+
+  return {
+    code: parts.join(''),
+    hasColumnReference: true,
+  };
+}
+
+const COLUMN_ACCESSOR_PREAMBLE = `
+const __accessColumn = (columnKey) => {
+  if (!Object.prototype.hasOwnProperty.call(__rowData, columnKey)) {
+    __missingColumn(columnKey);
+  }
+  return __rowData[columnKey];
+};
+`;
+
 /**
  * 안전하게 함수를 실행 (비동기, 타임아웃 지원)
  * @param code 함수 본문 (예: "return value * 2")
@@ -341,30 +573,19 @@ export function executeFunctionSync(
     } else {
       // 단일 값 변환 모드
       // $column-name 형식을 실제 값으로 치환
-      let processedCode = normalizedCode;
-      const rowData = options?.rowData || {};
-      
-      // $column-name 패턴 찾기 및 치환 (식별자: 영문자, 숫자, 언더스코어, 점)
-      const columnRefPattern = /\$([a-zA-Z_][a-zA-Z0-9_\.]*)/g;
-      const columnRefs = new Set<string>();
-      let match;
-      while ((match = columnRefPattern.exec(normalizedCode)) !== null) {
-        columnRefs.add(match[1]);
+      const rowData = (options?.rowData || {}) as Record<string, unknown>;
+      const columnProcessing = processColumnReferences(normalizedCode, rowData);
+      if (columnProcessing.error) {
+        return {
+          success: false,
+          error: columnProcessing.error,
+        };
       }
-      
-      // 각 열 참조를 실제 값으로 치환
-      columnRefs.forEach((colKey) => {
-        const refValue = rowData[colKey];
-        const refValueStr = refValue === undefined || refValue === null 
-          ? 'undefined' 
-          : typeof refValue === 'string' 
-          ? JSON.stringify(refValue)
-          : JSON.stringify(refValue);
-        processedCode = processedCode.replace(
-          new RegExp(`\\$${colKey.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'g'),
-          refValueStr
-        );
-      });
+
+      let processedCode = columnProcessing.code;
+      if (columnProcessing.hasColumnReference) {
+        processedCode = `${COLUMN_ACCESSOR_PREAMBLE}\n${processedCode}`;
+      }
       
       // 단일 값 변환 모드: return; (명시적으로 undefined 반환) 시 행 삭제
       // return이 없으면 기존값 유지
@@ -374,8 +595,11 @@ export function executeFunctionSync(
       const hasExplicitReturn = /\breturn\b/.test(finalCode);
       
       const singleVariableName = getValidIdentifier(options?.singleVariableName, 'a');
-      const func = new Function(singleVariableName, finalCode);
-      const result = func(value);
+      const missingColumnHandler = (columnKey: string): never => {
+        throw new Error(`${columnKey} 열을 찾을 수 없습니다`);
+      };
+      const func = new Function(singleVariableName, '__rowData', '__missingColumn', finalCode);
+      const result = func(value, rowData, missingColumnHandler);
       
       // 명시적으로 return이 있고 결과가 undefined면 행 삭제
       // (return; 또는 return undefined; 같은 경우)

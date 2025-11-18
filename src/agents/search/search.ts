@@ -3,14 +3,17 @@
  */
 import type { TableData } from '../store/types';
 import type { SearchResult } from './types';
-import { parseQuery, type ColumnSelection, type RowSelection, type NumericComparison, type StringComparison } from './queryParser';
+import { parseQuery, type ColumnSelection, type RowSelection, type NumericComparison, type StringComparison, type ParsedQuery } from './queryParser';
 import { resolveColumnSelectionToKeys, resolveRowSelectionToIndices } from './selectionUtils';
 
 export function searchData(data: TableData, query: string, useRegex: boolean = false): SearchResult[] {
   if (!query.trim()) return [];
 
   const parsed = parseQuery(query);
-  
+  return searchDataWithParsed(data, parsed, useRegex);
+}
+
+function searchDataWithParsed(data: TableData, parsed: ParsedQuery, useRegex: boolean): SearchResult[] {
   // 파싱된 쿼리 타입에 따라 다른 검색 로직 실행
   switch (parsed.type) {
     case 'normal':
@@ -54,8 +57,10 @@ export function searchData(data: TableData, query: string, useRegex: boolean = f
         return rowColumnSearch(data, parsed.rowSelection, parsed.columnSelection);
       }
       return [];
+    case 'logicalGroup':
+      return logicalGroupSearch(data, parsed.subQueries || [], parsed.groupOperator || '&', useRegex);
     default:
-      return normalSearch(data, query, useRegex);
+      return normalSearch(data, parsed.text || '', useRegex);
   }
 }
 
@@ -391,6 +396,97 @@ function comparisonSearch(data: TableData, numericComparisons: NumericComparison
 
 function stringComparisonSearch(data: TableData, stringComparisons: StringComparison[], logicalOp: '&' | '|'): SearchResult[] {
   return comparisonSearch(data, [], stringComparisons, logicalOp);
+}
+
+function logicalGroupSearch(data: TableData, subQueries: ParsedQuery[], operator: '&' | '|', useRegex: boolean): SearchResult[] {
+  if (subQueries.length === 0) {
+    return [];
+  }
+
+  const grouped = subQueries.map(query => {
+    const results = searchDataWithParsed(data, query, useRegex);
+    return {
+      rowMap: groupResultsByRow(results),
+    };
+  });
+
+  const rowSets = grouped.map(entry => new Set(entry.rowMap.keys()));
+  const targetRows = operator === '&'
+    ? intersectRowSets(rowSets)
+    : unionRowSets(rowSets);
+
+  if (targetRows.size === 0) {
+    return [];
+  }
+
+  const mergedRowMap = new Map<string, Map<string, number>>();
+
+  targetRows.forEach(rowId => {
+    const columnMap = new Map<string, number>();
+    grouped.forEach(({ rowMap }) => {
+      const sourceColumns = rowMap.get(rowId);
+      if (!sourceColumns) {
+        return;
+      }
+      sourceColumns.forEach((matches, columnKey) => {
+        const current = columnMap.get(columnKey) ?? 0;
+        columnMap.set(columnKey, current + matches);
+      });
+    });
+
+    if (columnMap.size > 0) {
+      mergedRowMap.set(rowId, columnMap);
+    }
+  });
+
+  return flattenRowColumnMap(mergedRowMap);
+}
+
+function groupResultsByRow(results: SearchResult[]): Map<string, Map<string, number>> {
+  const map = new Map<string, Map<string, number>>();
+  results.forEach(result => {
+    const columnMap = map.get(result.rowId) ?? new Map<string, number>();
+    const current = columnMap.get(result.columnKey) ?? 0;
+    columnMap.set(result.columnKey, current + result.matches);
+    map.set(result.rowId, columnMap);
+  });
+  return map;
+}
+
+function intersectRowSets(rowSets: Array<Set<string>>): Set<string> {
+  if (rowSets.length === 0) {
+    return new Set();
+  }
+  const [first, ...rest] = rowSets;
+  const result = new Set<string>();
+  first.forEach(rowId => {
+    if (rest.every(set => set.has(rowId))) {
+      result.add(rowId);
+    }
+  });
+  return result;
+}
+
+function unionRowSets(rowSets: Array<Set<string>>): Set<string> {
+  const result = new Set<string>();
+  rowSets.forEach(set => {
+    set.forEach(rowId => result.add(rowId));
+  });
+  return result;
+}
+
+function flattenRowColumnMap(rowMap: Map<string, Map<string, number>>): SearchResult[] {
+  const results: SearchResult[] = [];
+  rowMap.forEach((columns, rowId) => {
+    columns.forEach((matches, columnKey) => {
+      results.push({
+        rowId,
+        columnKey,
+        matches,
+      });
+    });
+  });
+  return results;
 }
 
 function rowColumnSearch(data: TableData, rowSelection: RowSelection, columnSelection: ColumnSelection): SearchResult[] {

@@ -29,7 +29,7 @@ export type StringComparison = {
 };
 
 export interface ParsedQuery {
-  type: 'normal' | 'column' | 'columnPresence' | 'comparison' | 'stringComparison' | 'row' | 'rowRange' | 'rowList' | 'cell' | 'cellRange' | 'cellList' | 'columnFilter' | 'rowColumn';
+  type: 'normal' | 'column' | 'columnPresence' | 'comparison' | 'stringComparison' | 'row' | 'rowRange' | 'rowList' | 'cell' | 'cellRange' | 'cellList' | 'columnFilter' | 'rowColumn' | 'logicalGroup';
   // normal 검색
   text?: string;
   // column=key 검색 (정확한 일치)
@@ -74,6 +74,9 @@ export interface ParsedQuery {
   filterColumnEnd?: number;
   // ::b,c,d 열 리스트 필터링
   filterColumns?: Array<string | number>;
+  // 논리 그룹 (AND / OR)
+  groupOperator?: '&' | '|';
+  subQueries?: ParsedQuery[];
 }
 
 export function parseQuery(query: string): ParsedQuery {
@@ -81,6 +84,25 @@ export function parseQuery(query: string): ParsedQuery {
   
   if (!trimmed) {
     return { type: 'normal', text: '' };
+  }
+
+  // & 또는 | 기준 논리 그룹 (문자열 리터럴 안의 & / | 는 무시)
+  const andParts = splitQueryByOperator(trimmed, '&');
+  if (andParts) {
+    return {
+      type: 'logicalGroup',
+      groupOperator: '&',
+      subQueries: andParts.map(part => parseQuery(part)),
+    };
+  }
+
+  const orParts = splitQueryByOperator(trimmed, '|');
+  if (orParts) {
+    return {
+      type: 'logicalGroup',
+      groupOperator: '|',
+      subQueries: orParts.map(part => parseQuery(part)),
+    };
   }
 
   // ::b 형식 (열 필터링)
@@ -220,12 +242,13 @@ export function parseQuery(query: string): ParsedQuery {
   // !column^=value, !column$=value, !column*=value, !column=value 형식 (부정 속성 검색)
   const negatedAttributeMatch = trimmed.match(/^!\s*([a-zA-Z_][a-zA-Z0-9_.]*)\s*(\^=|\$=|\*=|=)\s*(.+)$/);
   if (negatedAttributeMatch) {
+    const parsedValue = parseValueLiteral(negatedAttributeMatch[3]);
     return {
       type: 'column',
       columnAttributeSearch: {
         columnName: negatedAttributeMatch[1],
         operator: negatedAttributeMatch[2] as '^=' | '$=' | '*=' | '=',
-        value: negatedAttributeMatch[3],
+        value: parsedValue.value,
         negated: true,
       },
     };
@@ -234,12 +257,13 @@ export function parseQuery(query: string): ParsedQuery {
   // column^=value, column$=value, column*=value 형식 (속성 검색)
   const attributeMatch = trimmed.match(/^([a-zA-Z_][a-zA-Z0-9_.]*)\s*(\^=|\$=|\*=)\s*(.+)$/);
   if (attributeMatch) {
+    const parsedValue = parseValueLiteral(attributeMatch[3]);
     return {
       type: 'column',
       columnAttributeSearch: {
         columnName: attributeMatch[1],
         operator: attributeMatch[2] as '^=' | '$=' | '*=',
-        value: attributeMatch[3],
+        value: parsedValue.value,
         negated: false,
       },
     };
@@ -248,95 +272,37 @@ export function parseQuery(query: string): ParsedQuery {
   // column=value 형식 (정확한 일치) - 먼저 처리
   const columnMatch = trimmed.match(/^([a-zA-Z_][a-zA-Z0-9_.]*)\s*=\s*(.+)$/);
   if (columnMatch) {
+    const parsedValue = parseValueLiteral(columnMatch[2]);
     return {
       type: 'column',
       columnName: columnMatch[1],
-      text: columnMatch[2],
+      text: parsedValue.value,
     };
   }
 
-  // & 또는 | 연산자 지원
-  const hasAnd = trimmed.includes('&');
-  const hasOr = trimmed.includes('|');
-  const logicalOp = hasAnd ? '&' as const : (hasOr ? '|' as const : undefined);
-  
-  if (hasAnd || hasOr) {
-    const separator = hasAnd ? '&' : '|';
-    const parts = trimmed.split(separator);
-    const numericComparisons: NumericComparison[] = [];
-    const stringComparisons: StringComparison[] = [];
-    
-    for (const part of parts) {
-      const comp = parseComparison(part.trim());
-      if (comp) {
-        if (comp.isNumeric) {
-          numericComparisons.push({
-            column: comp.column,
-            operator: comp.operator,
-            value: comp.value,
-            isNumeric: true,
-          });
-        } else {
-          stringComparisons.push({
-            column: comp.column,
-            operator: comp.operator,
-            value: comp.value,
-            isNumeric: false,
-          });
-        }
-      }
+  // 단일 비교 연산자 (= 제외, 이미 위에서 처리됨)
+  const comp = parseComparison(trimmed);
+  if (comp) {
+    if (comp.isNumeric) {
+      return {
+        type: 'comparison',
+        comparisons: [{
+          column: comp.column,
+          operator: comp.operator,
+          value: comp.value,
+          isNumeric: true,
+        }],
+      };
     }
-    
-    if (numericComparisons.length > 0 || stringComparisons.length > 0) {
-      // 숫자 비교와 문자열 비교가 혼합된 경우도 처리
-      if (numericComparisons.length > 0 && stringComparisons.length > 0) {
-        // 혼합 타입 - 두 가지 모두 반환 (둘 다 처리 필요)
-        return {
-          type: 'comparison',
-          comparisons: numericComparisons,
-          stringComparisons,
-          logicalOperator: logicalOp,
-        };
-      } else if (numericComparisons.length > 0) {
-        return {
-          type: 'comparison',
-          comparisons: numericComparisons,
-          logicalOperator: logicalOp,
-        };
-      } else {
-        return {
-          type: 'stringComparison',
-          stringComparisons,
-          logicalOperator: logicalOp,
-        };
-      }
-    }
-  } else {
-    // 단일 비교 연산자 (= 제외, 이미 위에서 처리됨)
-    const comp = parseComparison(trimmed);
-    if (comp) {
-      if (comp.isNumeric) {
-        return {
-          type: 'comparison',
-          comparisons: [{
-            column: comp.column,
-            operator: comp.operator,
-            value: comp.value,
-            isNumeric: true,
-          }],
-        };
-      } else {
-        return {
-          type: 'stringComparison',
-          stringComparisons: [{
-            column: comp.column,
-            operator: comp.operator,
-            value: comp.value,
-            isNumeric: false,
-          }],
-        };
-      }
-    }
+    return {
+      type: 'stringComparison',
+      stringComparisons: [{
+        column: comp.column,
+        operator: comp.operator,
+        value: comp.value,
+        isNumeric: false,
+      }],
+    };
   }
 
   // 일반 텍스트 검색
@@ -362,8 +328,9 @@ function parseComparison(str: string): NumericComparison | StringComparison | nu
     const match = str.match(pattern.regex);
     if (match) {
       const column = match[1];
-      const valueStr = match[2].trim();
-      const numValue = parseFloat(valueStr);
+      const parsedValue = parseValueLiteral(match[2]);
+      const valueStr = parsedValue.value.trim();
+      const numValue = parsedValue.wasQuoted ? NaN : parseFloat(valueStr);
       
       if (pattern.operator === '!>') {
         return {
@@ -456,5 +423,94 @@ function parseColumnSelection(colSpec: string): ColumnSelection | null {
   
   const singleValue = parseColumnSpec(trimmed);
   return { kind: 'single', value: singleValue };
+}
+
+function splitQueryByOperator(input: string, operator: '&' | '|'): string[] | null {
+  if (!input.includes(operator)) {
+    return null;
+  }
+
+  const parts: string[] = [];
+  let current = '';
+  let inQuotes = false;
+  let escaped = false;
+  let usedOperator = false;
+
+  for (const char of input) {
+    if (escaped) {
+      current += char;
+      escaped = false;
+      continue;
+    }
+
+    if (inQuotes && char === '\\') {
+      current += char;
+      escaped = true;
+      continue;
+    }
+
+    if (char === '"') {
+      inQuotes = !inQuotes;
+      current += char;
+      continue;
+    }
+
+    if (!inQuotes && char === operator) {
+      if (current.trim().length > 0) {
+        parts.push(current.trim());
+      }
+      current = '';
+      usedOperator = true;
+      continue;
+    }
+
+    current += char;
+  }
+
+  if (inQuotes) {
+    return null;
+  }
+
+  if (current.trim().length > 0) {
+    parts.push(current.trim());
+  }
+
+  return usedOperator && parts.length > 1 ? parts : null;
+}
+
+function parseValueLiteral(raw: string): { value: string; wasQuoted: boolean } {
+  const trimmed = raw.trim();
+  if (!trimmed.startsWith('"')) {
+    return { value: trimmed, wasQuoted: false };
+  }
+
+  let result = '';
+  let escaped = false;
+  for (let i = 1; i < trimmed.length; i += 1) {
+    const char = trimmed[i];
+
+    if (escaped) {
+      result += char;
+      escaped = false;
+      continue;
+    }
+
+    if (char === '\\') {
+      escaped = true;
+      continue;
+    }
+
+    if (char === '"') {
+      const remainder = trimmed.slice(i + 1).trim();
+      if (remainder.length === 0) {
+        return { value: result, wasQuoted: true };
+      }
+      break;
+    }
+
+    result += char;
+  }
+
+  return { value: trimmed, wasQuoted: false };
 }
 
