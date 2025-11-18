@@ -1,7 +1,7 @@
 {
   "productName": "JSON Table Editor",
   "version": "0.1.4",
-  "identifier": "com.jsontableeditor.app",
+  "identifier": "com.goooosy.jable",
   "build": {
     "beforeDevCommand": "pnpm dev:tauri",
     "beforeBuildCommand": "pnpm build",
