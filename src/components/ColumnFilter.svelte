@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { getColumnValues } from '../agents/filters';
+  import { filterCache } from '../agents/filters/filterCache';
   import type { TableData, Column } from '../agents/store';
 
   export let data: TableData;
@@ -14,33 +14,83 @@
   let uniqueValues: any[] = [];
   let filteredValues: any[] = [];
   let displayedValues: any[] = [];
-  let showMore = false;
-  const INITIAL_DISPLAY_COUNT = 5;
+  let isListLoaded = false; // 목록이 로드되었는지 여부
+  let filterInputElement: HTMLInputElement | null = null;
 
-  // 필터가 열릴 때마다 전체 데이터에서 고유 값 가져오기
-  // data와 data.rows를 명시적으로 dependency로 사용하여 데이터 변경 시 업데이트
+  // 이전 데이터 상태 추적 (캐시 무효화 감지용)
+  let previousRowCount = 0;
+  let previousDataHash = '';
+
+  // 데이터 해시 생성 (간단한 버전)
+  function generateSimpleHash(data: TableData, columnKey: string): string {
+    const rowCount = data.rows.length;
+    // 성능 최적화: 대용량 데이터는 행 개수만 사용
+    if (rowCount > 10000) {
+      return `${rowCount}:${columnKey}`;
+    }
+    // 작은 데이터는 행 개수와 각 행의 해당 열 값 시그니처 사용
+    const signatures = data.rows.map((row) => {
+      const cell = row.cells[columnKey];
+      return String(cell?.value ?? '');
+    });
+    return `${rowCount}:${signatures.join('|')}`;
+  }
+
+  // 필터가 열릴 때 초기화만 수행 (목록은 로드하지 않음)
   $: data, data.rows, isOpen, column?.key, (() => {
     if (isOpen && data && data.rows && data.rows.length > 0 && column && column.key) {
-      // 항상 원본 데이터의 모든 행에서 고유 값 추출
-      uniqueValues = getColumnValues(data, column.key);
-      showMore = false; // 필터가 다시 열릴 때 초기화
-      filteredValues = uniqueValues;
-      updateDisplayedValues();
+      const currentHash = generateSimpleHash(data, column.key);
+      const currentRowCount = data.rows.length;
+
+      // 데이터가 변경되었는지 확인 (행 삭제 또는 열 값 변경)
+      const dataChanged = 
+        previousRowCount !== currentRowCount || 
+        previousDataHash !== currentHash;
+
+      if (dataChanged) {
+        // 데이터가 변경되었으면 해당 열의 캐시 무효화 및 목록 초기화
+        filterCache.invalidateColumn(column.key);
+        previousRowCount = currentRowCount;
+        previousDataHash = currentHash;
+        isListLoaded = false;
+        uniqueValues = [];
+        filteredValues = [];
+        displayedValues = [];
+      }
+
+      // 필터가 열릴 때 input에 포커스
+      setTimeout(() => {
+        if (filterInputElement) {
+          filterInputElement.focus();
+        }
+      }, 0);
     } else {
       // 필터가 닫히거나 데이터가 없으면 값 목록 초기화
       uniqueValues = [];
       filteredValues = [];
       displayedValues = [];
-      showMore = false;
+      isListLoaded = false;
     }
   })();
 
-  function updateDisplayedValues() {
-    const source = filteredValues;
-    displayedValues = showMore ? source : source.slice(0, INITIAL_DISPLAY_COUNT);
+  // 목록 불러오기 함수
+  function loadValueList() {
+    if (!data || !data.rows || data.rows.length === 0 || !column || !column.key) {
+      return;
+    }
+
+    // 캐시를 사용하여 고유 값 가져오기
+    uniqueValues = filterCache.getColumnValues(data, column.key);
+    isListLoaded = true;
+    filteredValues = uniqueValues;
+    updateDisplayedValues();
   }
 
-  $: if (showMore !== undefined) {
+  function updateDisplayedValues() {
+    displayedValues = filteredValues;
+  }
+
+  $: if (filteredValues) {
     updateDisplayedValues();
   }
 
@@ -51,14 +101,56 @@
   }
 
   function closeFilter() {
+    // 필터 닫을 때 현재 입력된 값으로 필터 적용 (빈 값이면 필터 제거)
+    if (filterValue.trim()) {
+      applyFilter();
+    } else {
+      // 빈 값이면 필터 제거
+      onFilter(column.key, '');
+    }
     if (onToggle) {
       onToggle(column.key);
     }
   }
 
+  // 값 목록 필터링 (실시간, 필터 적용은 안 함)
+  function handleFilterSearch() {
+    // 목록이 로드된 경우에만 값 목록 필터링
+    if (isListLoaded) {
+      // 필터 입력에 따라 값 목록 필터링
+      if (filterValue.trim() === '') {
+        filteredValues = uniqueValues;
+      } else {
+        const searchTerm = filterValue.toLowerCase();
+        filteredValues = uniqueValues.filter((value) => {
+          const valueStr = formatDisplayValue(value).toLowerCase();
+          return valueStr.includes(searchTerm);
+        });
+      }
+      updateDisplayedValues();
+    }
+    // 목록이 로드되지 않아도 필터 검색 자체는 가능 (엔터나 닫을 때 적용됨)
+  }
 
-  function handleFilterInput() {
+  // 실제 필터 적용 (엔터 키 또는 필터 닫을 때 호출)
+  function applyFilter() {
     onFilter(column.key, filterValue);
+  }
+
+  // 필터 삭제
+  function clearFilter() {
+    filterValue = '';
+    filteredValues = uniqueValues;
+    updateDisplayedValues();
+    applyFilter();
+  }
+
+  // 엔터 키 입력 처리
+  function handleKeyDown(event: KeyboardEvent) {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      applyFilter();
+    }
   }
 
   function selectValue(value: any) {
@@ -80,6 +172,11 @@
     if (value === '') return '__SPECIAL_EMPTY__';
     return String(value);
   }
+
+  function handleFilterClick() {
+    filterInputElement?.focus();
+  }
+
 </script>
 
 <div class="column-filter">
@@ -101,14 +198,28 @@
           <span class="material-icons">close</span>
         </button>
       </div>
-      <input
-        type="text"
-        class="filter-input"
-        placeholder="필터 값..."
-        bind:value={filterValue}
-        on:input={handleFilterInput}
-      />
-      {#if uniqueValues.length > 0}
+      <div class="filter-input-wrapper">
+        <input
+          type="text"
+          class="filter-input"
+          placeholder="필터 값..."
+          bind:value={filterValue}
+          bind:this={filterInputElement}
+          on:input={handleFilterSearch}
+          on:keydown={handleKeyDown}
+          on:click={handleFilterClick}
+        />
+        {#if filterValue}
+          <button class="clear-filter-btn" on:click={clearFilter} title="필터 삭제">
+            <span class="material-icons">close</span>
+          </button>
+        {/if}
+      </div>
+      {#if !isListLoaded}
+        <button class="load-list-btn" on:click={loadValueList}>
+          목록 불러오기
+        </button>
+      {:else if uniqueValues.length > 0}
         <div class="value-list">
           {#each displayedValues as value}
             <button class="value-item" on:click={() => selectValue(value)}>
@@ -123,11 +234,6 @@
               {/if}
             </button>
           {/each}
-          {#if uniqueValues.length > INITIAL_DISPLAY_COUNT && !showMore}
-            <button class="load-more-btn" on:click={() => { showMore = true; }}>
-              더 불러오기... ({uniqueValues.length - INITIAL_DISPLAY_COUNT}개 더)
-            </button>
-          {/if}
         </div>
       {/if}
     </div>
@@ -246,16 +352,22 @@
     color: var(--text-primary);
   }
 
+  .filter-input-wrapper {
+    position: relative;
+    display: flex;
+    align-items: center;
+    border-bottom: 1px solid var(--border);
+  }
+
   .filter-input {
     width: 100%;
     padding: 0.5rem;
+    padding-right: 2rem;
     border: none;
-    border-bottom: 1px solid var(--border);
     font-size: 0.875rem;
     background: var(--bg-primary);
     color: var(--text-primary);
   }
-
 
   .filter-input::placeholder {
     color: var(--text-secondary);
@@ -264,6 +376,35 @@
   .filter-input:focus {
     outline: none;
     /* border-bottom-color: var(--accent); */
+  }
+
+  .clear-filter-btn {
+    position: absolute;
+    right: 0.25rem;
+    width: 20px;
+    height: 20px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: none;
+    background: transparent;
+    border-radius: 4px;
+    cursor: pointer;
+    padding: 0;
+    transition: background 0.2s;
+  }
+
+  .clear-filter-btn .material-icons {
+    font-size: 16px;
+    color: var(--text-secondary);
+  }
+
+  .clear-filter-btn:hover {
+    background: var(--bg-tertiary);
+  }
+
+  .clear-filter-btn:hover .material-icons {
+    color: var(--text-primary);
   }
 
   .value-list {
@@ -299,9 +440,9 @@
     font-style: italic;
   }
 
-  .load-more-btn {
+  .load-list-btn {
     width: 100%;
-    padding: 0.5rem;
+    padding: 0.75rem;
     text-align: center;
     font-size: 0.875rem;
     border: none;
@@ -313,8 +454,9 @@
     font-weight: 500;
   }
 
-  .load-more-btn:hover {
+  .load-list-btn:hover {
     background: var(--bg-tertiary);
   }
+
 </style>
 

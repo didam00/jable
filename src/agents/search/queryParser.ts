@@ -29,7 +29,7 @@ export type StringComparison = {
 };
 
 export interface ParsedQuery {
-  type: 'normal' | 'column' | 'columnPresence' | 'comparison' | 'stringComparison' | 'row' | 'rowRange' | 'rowList' | 'cell' | 'cellRange' | 'cellList' | 'columnFilter' | 'rowColumn' | 'logicalGroup';
+  type: 'normal' | 'column' | 'columnPresence' | 'comparison' | 'stringComparison' | 'row' | 'rowRange' | 'rowList' | 'cell' | 'cellRange' | 'cellList' | 'columnFilter' | 'rowColumn' | 'logicalGroup' | 'columnEquality' | 'columnContains';
   // normal 검색
   text?: string;
   // column=key 검색 (정확한 일치)
@@ -77,6 +77,17 @@ export interface ParsedQuery {
   // 논리 그룹 (AND / OR)
   groupOperator?: '&' | '|';
   subQueries?: ParsedQuery[];
+  // column1=column2 (컬럼 간 동일성 검색)
+  columnEquality?: {
+    column1: string;
+    column2: string;
+  };
+  // column1*=column2 (컬럼 간 포함 검색)
+  columnContains?: {
+    column1: string;
+    column2: string;
+    excludeSelf?: boolean; // column1*=column1인 경우 자기 자신 제외
+  };
 }
 
 export function parseQuery(query: string): ParsedQuery {
@@ -255,9 +266,24 @@ export function parseQuery(query: string): ParsedQuery {
   }
 
   // column^=value, column$=value, column*=value 형식 (속성 검색)
+  // column1*=column2는 여기서 처리하지 않고, 검색 단계에서 column2가 컬럼인지 확인하여 처리
   const attributeMatch = trimmed.match(/^([a-zA-Z_][a-zA-Z0-9_.]*)\s*(\^=|\$=|\*=)\s*(.+)$/);
   if (attributeMatch) {
     const parsedValue = parseValueLiteral(attributeMatch[3]);
+    const valueStr = parsedValue.value.trim();
+    
+    // column1*=column2 형식인지 확인 (값이 컬럼명 패턴이고 따옴표로 감싸지지 않은 경우)
+    if (attributeMatch[2] === '*=' && !parsedValue.wasQuoted && /^[a-zA-Z_][a-zA-Z0-9_.]*$/.test(valueStr)) {
+      return {
+        type: 'columnContains',
+        columnContains: {
+          column1: attributeMatch[1],
+          column2: valueStr,
+          excludeSelf: attributeMatch[1] === valueStr, // 자기 자신이면 제외
+        },
+      };
+    }
+    
     return {
       type: 'column',
       columnAttributeSearch: {
@@ -269,10 +295,23 @@ export function parseQuery(query: string): ParsedQuery {
     };
   }
 
-  // column=value 형식 (정확한 일치) - 먼저 처리
+  // column=value 형식 (정확한 일치) - 따옴표로 감싸진 값 또는 일반 문자열
   const columnMatch = trimmed.match(/^([a-zA-Z_][a-zA-Z0-9_.]*)\s*=\s*(.+)$/);
   if (columnMatch) {
     const parsedValue = parseValueLiteral(columnMatch[2]);
+    const valueStr = parsedValue.value.trim();
+    
+    // column1=column2 형식인지 확인 (값이 컬럼명 패턴이고 따옴표로 감싸지지 않은 경우)
+    if (!parsedValue.wasQuoted && /^[a-zA-Z_][a-zA-Z0-9_.]*$/.test(valueStr)) {
+      return {
+        type: 'columnEquality',
+        columnEquality: {
+          column1: columnMatch[1],
+          column2: valueStr,
+        },
+      };
+    }
+    
     return {
       type: 'column',
       columnName: columnMatch[1],

@@ -33,8 +33,13 @@
   });
 
   // query가 변경될 때마다 검색 실행 (스트리밍 모드가 아닐 때만)
-  $: if (!isStreamingMode) {
-    performSearch();
+  $: {
+    if (!isStreamingMode) {
+      // query 변경을 명시적으로 의존성으로 추가하기 위해 참조
+      void query;
+      console.log('[SearchBar] reactive statement 트리거:', { query, isStreamingMode, queryLength: query.length });
+      performSearch();
+    }
   }
 
   onMount(() => {
@@ -61,12 +66,20 @@
     const trimmed = query.trim();
     if (!trimmed) {
       results = [];
+      console.log('[SearchBar] 검색 쿼리 비어있음 - 검색 초기화');
       dispatch('searchChange', { 
         matchedRowIds: new Set<string>(),
         filteredColumnKeys: null,
       });
       return;
     }
+    
+    console.log('[SearchBar] 검색 시작:', {
+      query: trimmed,
+      useRegex,
+      dataRowCount: data.rows.length,
+      dataColumnCount: data.columns.length,
+    });
     
     const parsed = parseQuery(trimmed);
     results = searchData(data, trimmed, useRegex);
@@ -76,10 +89,20 @@
     
     const filteredColumnKeys = resolveFilteredColumns(parsed);
     
+    console.log('[SearchBar] 검색 결과:', {
+      resultsCount: results.length,
+      matchedRowIdsCount: matchedRowIds.size,
+      matchedRowIds: Array.from(matchedRowIds).slice(0, 10), // 처음 10개만
+      filteredColumnKeys,
+      sampleResults: results.slice(0, 3), // 처음 3개 결과 샘플
+    });
+    
     dispatch('searchChange', { 
       matchedRowIds,
       filteredColumnKeys,
     });
+    
+    console.log('[SearchBar] searchChange 이벤트 전송 완료');
   }
 
   function handleKeydown(event: KeyboardEvent) {

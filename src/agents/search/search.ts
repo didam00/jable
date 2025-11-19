@@ -59,6 +59,21 @@ function searchDataWithParsed(data: TableData, parsed: ParsedQuery, useRegex: bo
       return [];
     case 'logicalGroup':
       return logicalGroupSearch(data, parsed.subQueries || [], parsed.groupOperator || '&', useRegex);
+    case 'columnEquality':
+      if (parsed.columnEquality) {
+        return columnEqualitySearch(data, parsed.columnEquality.column1, parsed.columnEquality.column2);
+      }
+      return [];
+    case 'columnContains':
+      if (parsed.columnContains) {
+        return columnContainsSearch(
+          data,
+          parsed.columnContains.column1,
+          parsed.columnContains.column2,
+          parsed.columnContains.excludeSelf || false
+        );
+      }
+      return [];
     default:
       return normalSearch(data, parsed.text || '', useRegex);
   }
@@ -663,6 +678,125 @@ function columnFilterSearch(data: TableData, columnSpec: string | number | undef
         columnKey: column.key,
         matches: 1,
       });
+    }
+  });
+
+  return results;
+}
+
+// column1=column2: 같은 행에서 두 컬럼 값이 같은지 검색
+function columnEqualitySearch(data: TableData, column1Name: string, column2Name: string): SearchResult[] {
+  const results: SearchResult[] = [];
+  const column1 = data.columns.find(col => col.key === column1Name || col.label === column1Name);
+  const column2 = data.columns.find(col => col.key === column2Name || col.label === column2Name);
+
+  // column1이 컬럼이 아니면 일반 텍스트 검색으로 처리
+  if (!column1) {
+    // 일반 텍스트 검색으로 폴백
+    return normalSearch(data, `${column1Name}=${column2Name}`, false);
+  }
+
+  // column2가 컬럼이 아니면 일반 문자열 검색으로 처리
+  if (!column2) {
+    return columnExactSearch(data, column1Name, column2Name);
+  }
+
+  data.rows.forEach(row => {
+    const cell1 = row.cells[column1.key];
+    const cell2 = row.cells[column2.key];
+
+    if (!cell1 || !cell2) return;
+
+    const value1 = String(cell1.value ?? '');
+    const value2 = String(cell2.value ?? '');
+
+    // 대소문자 구분 없이 비교
+    if (value1.toLowerCase() === value2.toLowerCase()) {
+      results.push({
+        rowId: row.id,
+        columnKey: column1.key,
+        matches: 1,
+      });
+    }
+  });
+
+  return results;
+}
+
+// column1*=column2: 전체 column2 값들 중 column1 값이 포함되는지 검색
+function columnContainsSearch(data: TableData, column1Name: string, column2Name: string, excludeSelf: boolean): SearchResult[] {
+  const results: SearchResult[] = [];
+  const column1 = data.columns.find(col => col.key === column1Name || col.label === column1Name);
+  const column2 = data.columns.find(col => col.key === column2Name || col.label === column2Name);
+
+  // column1이 컬럼이 아니면 일반 텍스트 검색으로 처리
+  if (!column1) {
+    // 일반 텍스트 검색으로 폴백
+    return normalSearch(data, `${column1Name}*=${column2Name}`, false);
+  }
+
+  // column2가 컬럼이 아니면 일반 속성 검색으로 처리
+  if (!column2) {
+    return columnAttributeSearch(data, column1Name, '*=', column2Name, false, false);
+  }
+
+  // column2의 모든 고유 값 수집
+  const column2Values = new Set<string>();
+  data.rows.forEach(row => {
+    const cell2 = row.cells[column2.key];
+    if (cell2) {
+      const value2 = String(cell2.value ?? '').toLowerCase();
+      if (value2) {
+        column2Values.add(value2);
+      }
+    }
+  });
+
+  // column1 값이 column2 값들 중 하나에 포함되는지 검색
+  data.rows.forEach(row => {
+    const cell1 = row.cells[column1.key];
+    if (!cell1) return;
+
+    const value1 = String(cell1.value ?? '').toLowerCase();
+    if (!value1) return;
+
+    // 자기 자신 제외 (column1*=column1인 경우)
+    if (excludeSelf && column1.key === column2.key) {
+      // 같은 행의 다른 값들과 비교
+      let found = false;
+      data.rows.forEach(otherRow => {
+        if (otherRow.id === row.id) return; // 자기 자신 제외
+        const otherCell = otherRow.cells[column2.key];
+        if (otherCell) {
+          const otherValue = String(otherCell.value ?? '').toLowerCase();
+          if (otherValue && otherValue.includes(value1)) {
+            found = true;
+          }
+        }
+      });
+      if (found) {
+        results.push({
+          rowId: row.id,
+          columnKey: column1.key,
+          matches: 1,
+        });
+      }
+    } else {
+      // column2의 모든 값 중 value1이 포함되는 값이 있는지 확인
+      let found = false;
+      for (const value2 of column2Values) {
+        if (value2.includes(value1)) {
+          found = true;
+          break;
+        }
+      }
+      if (found) {
+        results.push({
+          rowId: row.id,
+          columnKey: column1.key,
+          matches: 1,
+        });
+      }
     }
   });
 

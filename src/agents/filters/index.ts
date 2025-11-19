@@ -4,5 +4,6 @@
  */
 
 export { applyFilters, sortRows, getColumnValues } from './filters';
+export { filterCache } from './filterCache';
 export type { Filter } from './types';
 

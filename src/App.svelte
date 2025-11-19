@@ -1287,8 +1287,18 @@
     on:saveAs={handleSaveAs}
     on:export={(e) => handleExport(e.detail.format)}
     on:searchChange={(e) => {
+      console.log('[App] searchChange 이벤트 수신:', {
+        matchedRowIdsCount: e.detail.matchedRowIds?.size ?? 0,
+        matchedRowIds: Array.from(e.detail.matchedRowIds || []).slice(0, 10), // 처음 10개만
+        filteredColumnKeys: e.detail.filteredColumnKeys,
+        filteredColumnKeysCount: e.detail.filteredColumnKeys?.length ?? 0,
+      });
       searchMatchedRowIds = e.detail.matchedRowIds;
       searchFilteredColumnKeys = e.detail.filteredColumnKeys;
+      console.log('[App] 상태 업데이트 완료:', {
+        searchMatchedRowIdsSize: searchMatchedRowIds.size,
+        searchFilteredColumnKeysLength: searchFilteredColumnKeys?.length ?? 0,
+      });
     }}
     on:openSettings={() => {
       showSettings = true;

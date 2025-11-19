@@ -200,6 +200,21 @@ column*=값          // 값이 포함됨
 - 예: `title*=test` - title 열에서 "test"가 포함된 값
 - 예: `!status=active` - status 열에서 "active"가 아닌 값
 
+### 2️⃣-1 컬럼 간 비교 검색
+```javascript
+column1=column2     // 같은 행에서 column1과 column2 값이 같은 행 검색
+column1*=column2    // 전체 column2 값들 중 column1 값이 포함되는 행 검색
+column1*=column1    // column1 값들 중 자기 자신을 제외한 다른 행에 같은 값이 있는 행 검색 (중복 검색)
+```
+- 컬럼 이름을 사용하여 컬럼 간 비교 검색이 가능합니다
+- `column1=column2`: 같은 행에서 두 컬럼의 값이 같은 경우를 검색합니다
+  - 만약 `column2`가 컬럼 이름이 아니라면 일반 문자열 검색으로 처리됩니다
+  - 예: `firstName=lastName` - firstName과 lastName이 같은 행 검색
+- `column1*=column2`: 전체 데이터에서 `column2`의 모든 값 중 `column1` 값이 포함되는 행을 검색합니다
+  - 예: `email*=domain` - domain 열의 값들 중 email 열 값이 포함되는 행 검색
+- `column1*=column1`: 자기 자신을 제외한 다른 행에 같은 값이 있는 경우를 검색합니다 (중복 검색)
+  - 예: `email*=email` - email 열에서 중복된 값이 있는 행 검색
+
 ### 3️⃣ 숫자 범위 검색
 ```javascript
 column>number
@@ -292,6 +307,11 @@ price>10&price<100
 // 열 필터링
 ::name
 ::2
+
+// 컬럼 간 비교 검색
+firstName=lastName        // 같은 행에서 두 컬럼 값이 같은 경우
+email*=domain             // domain 값들 중 email이 포함되는 경우
+email*=email              // email 중복 검색 (자기 자신 제외)
 ```
 
 ---
