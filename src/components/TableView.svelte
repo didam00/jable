@@ -5,6 +5,7 @@ import { sortRows } from '../agents/filters';
 import ColumnFilter from './ColumnFilter.svelte';
 // @ts-ignore - Svelte 컴포넌트는 자동으로 default export를 생성합니다
 import ColumnTransformDialog from './ColumnTransformDialog.svelte';
+import RemoveDuplicatesDialog from './RemoveDuplicatesDialog.svelte';
 import ContextMenu from './ContextMenu.svelte';
 import ImageViewer from './ImageViewer.svelte';
 import { executeFunctionSync, DELETE_MARKER } from '../utils/safeFunctionExecutor';
@@ -21,6 +22,11 @@ const PRIMITIVE_ARRAY_FIELD_KEY = '__value__';
 
 export let searchMatchedRowIds: Set<string> = new Set();
 export let searchFilteredColumnKeys: string[] | null = null;
+
+// 중복행 감지 관련
+let duplicateDetectionColumns: string[] = [];
+let duplicateRowIds: Set<string> = new Set();
+let showDuplicatesOnly = false;
 
 let data: TableData = {
   columns: [],
@@ -49,6 +55,8 @@ let resizePreviewWidth = 0;
 let resizeGuideLine: { x: number; visible: boolean } = { x: 0, visible: false };
 let selectedColumns: Set<string> = new Set();
 let showTransformDialog = false;
+let showRemoveDuplicatesDialog = false;
+let removeDuplicatesPreselectedColumns: string[] = [];
 let openFilterColumn: string | null = null;
 let contextMenu: { x: number; y: number; items: any[] } | null = null;
 let showImageViewer = false;
@@ -327,8 +335,9 @@ function matchesFilter(row: Row, columnKey: string, filter: ColumnFilterValue): 
     case 'empty':
       return cellValue === '';
     case 'text': {
-      const haystack = normalizeCellText(cellValue).toLowerCase();
-      return haystack.includes(filter.value.toLowerCase());
+      const haystack = normalizeCellText(cellValue);
+      const needle = filter.value;
+      return haystack === needle;
     }
     default:
       return true;
@@ -792,6 +801,8 @@ function getArrayEntryFieldValue(entry: any, fieldPath: string[] | undefined): a
       sortColumn,
       sortDirection,
       rowsLength: data.rows.length,
+      duplicateColumns: duplicateDetectionColumns.join(','),
+      showDuplicatesOnly,
     });
     
     // 필터 상태가 변경되지 않았으면 스킵
@@ -847,6 +858,11 @@ function getArrayEntryFieldValue(entry: any, fieldPath: string[] | undefined): a
       }
     }
     
+    // 중복행 필터 적용
+    if (showDuplicatesOnly && duplicateRowIds.size > 0) {
+      rows = rows.filter((row) => duplicateRowIds.has(row.id));
+    }
+    
     // 정렬 적용 (대용량 데이터는 정렬 최적화)
     if (sortColumn) {
       if (isLargeData && rows.length > 5000) {
@@ -886,6 +902,11 @@ function getArrayEntryFieldValue(entry: any, fieldPath: string[] | undefined): a
       updateFilteredRows();
       const filteredRowCount = filteredRows.length;
       const totalRowCount = data?.rows?.length ?? filteredRowCount;
+      // 중복 정보 계산
+      const duplicateInfo = duplicateDetectionColumns.length > 0 
+        ? detectDuplicates(duplicateDetectionColumns)
+        : { duplicateRowIds: new Set(), duplicateGroups: 0, totalDuplicates: 0 };
+
       dispatch('stateChange', {
         sortColumn,
         sortDirection,
@@ -894,6 +915,12 @@ function getArrayEntryFieldValue(entry: any, fieldPath: string[] | undefined): a
         ),
         filteredRowCount,
         totalRowCount,
+        duplicateInfo: {
+          columns: duplicateDetectionColumns,
+          groups: duplicateInfo.duplicateGroups,
+          totalDuplicates: duplicateInfo.totalDuplicates,
+          isFiltered: showDuplicatesOnly,
+        },
       });
       filterUpdateTimeout = null;
     }, 0); // 다음 틱에서 실행
@@ -1845,6 +1872,139 @@ function toggleChildArrayExpansion(rowId: string, columnKey: string) {
     showTransformDialog = false;
   }
 
+  function openRemoveDuplicatesDialog(preselectedColumns: string[] = []) {
+    removeDuplicatesPreselectedColumns = preselectedColumns;
+    showRemoveDuplicatesDialog = true;
+  }
+
+  function handleRemoveDuplicatesClose() {
+    showRemoveDuplicatesDialog = false;
+  }
+
+  function getRowKeyForDuplicates(row: Row, columnKeys: string[]): string {
+    const keyParts: string[] = [];
+    for (const colKey of columnKeys) {
+      const cell = row.cells[colKey];
+      const value = cell?.value;
+      // null, undefined를 문자열로 변환하여 비교
+      const normalizedValue = value === null ? '__NULL__' : 
+                              value === undefined ? '__UNDEFINED__' : 
+                              String(value);
+      keyParts.push(normalizedValue);
+    }
+    return keyParts.join('|');
+  }
+
+  function detectDuplicates(columnKeys: string[]): { duplicateRowIds: Set<string>; duplicateGroups: number; totalDuplicates: number } {
+    if (columnKeys.length === 0 || !data || !data.rows) {
+      return { duplicateRowIds: new Set(), duplicateGroups: 0, totalDuplicates: 0 };
+    }
+
+    const groups = new Map<string, Row[]>();
+    for (const row of data.rows) {
+      const key = getRowKeyForDuplicates(row, columnKeys);
+      if (!groups.has(key)) {
+        groups.set(key, []);
+      }
+      groups.get(key)!.push(row);
+    }
+
+    const duplicateRowIds = new Set<string>();
+    let duplicateGroups = 0;
+    let totalDuplicates = 0;
+
+    for (const [, groupRows] of groups.entries()) {
+      if (groupRows.length > 1) {
+        duplicateGroups++;
+        totalDuplicates += groupRows.length;
+        for (const row of groupRows) {
+          duplicateRowIds.add(row.id);
+        }
+      }
+    }
+
+    return { duplicateRowIds, duplicateGroups, totalDuplicates };
+  }
+
+  export function findDuplicates(columnKeys: string[]) {
+    duplicateDetectionColumns = columnKeys;
+    const result = detectDuplicates(columnKeys);
+    duplicateRowIds = result.duplicateRowIds;
+    showDuplicatesOnly = true;
+    lastFilterState = ''; // 필터 상태 리셋하여 업데이트 강제
+    updateStateAndDispatch();
+    forceVisibleRowsRefresh();
+  }
+
+  export function clearDuplicateFilter() {
+    duplicateDetectionColumns = [];
+    duplicateRowIds = new Set();
+    showDuplicatesOnly = false;
+    lastFilterState = '';
+    updateStateAndDispatch();
+    forceVisibleRowsRefresh();
+  }
+
+  function handleRemoveDuplicatesApply(columnKeys: string[], strategy: 'first' | 'last' | 'all' | 'none') {
+    if (columnKeys.length === 0) {
+      return;
+    }
+
+    // 필터링된 행을 가져오기
+    const targetRowsSnapshot = getTransformTargetRowsSnapshot({ allowFallback: true });
+    if (targetRowsSnapshot.length === 0) {
+      return;
+    }
+
+    // 중복 그룹 찾기
+    const groups = new Map<string, Row[]>();
+    for (const row of targetRowsSnapshot) {
+      const key = getRowKeyForDuplicates(row, columnKeys);
+      if (!groups.has(key)) {
+        groups.set(key, []);
+      }
+      groups.get(key)!.push(row);
+    }
+
+    // 삭제할 행 ID 수집
+    const rowsToDelete = new Set<string>();
+
+    for (const [, groupRows] of groups.entries()) {
+      if (groupRows.length > 1) {
+        if (strategy === 'first') {
+          // 첫 번째 제외하고 나머지 삭제
+          for (let i = 1; i < groupRows.length; i++) {
+            rowsToDelete.add(groupRows[i].id);
+          }
+        } else if (strategy === 'last') {
+          // 마지막 제외하고 나머지 삭제
+          for (let i = 0; i < groupRows.length - 1; i++) {
+            rowsToDelete.add(groupRows[i].id);
+          }
+        } else if (strategy === 'all') {
+          // 모두 삭제
+          for (const row of groupRows) {
+            rowsToDelete.add(row.id);
+          }
+        }
+        // 'none'은 아무것도 하지 않음
+      }
+    }
+
+    if (rowsToDelete.size === 0) {
+      return;
+    }
+
+    // 행 삭제
+    dataStore.update((data) => {
+      data.rows = data.rows.filter(row => !rowsToDelete.has(row.id));
+      data.metadata.rowCount = data.rows.length;
+      return data;
+    });
+
+    showRemoveDuplicatesDialog = false;
+  }
+
   // 열 이름 생성 함수 (중복 체크)
   function generateColumnName(data: TableData): string {
     const existingNames = new Set(data.columns.map(col => col.label.toLowerCase()));
@@ -1903,13 +2063,21 @@ function toggleChildArrayExpansion(rowId: string, columnKey: string) {
     }
   }
 
+  function isResizeHandle(target: EventTarget | null): boolean {
+    if (!target || !(target instanceof HTMLElement)) {
+      return false;
+    }
+    return target.classList.contains('resize-handle') || 
+           !!target.closest('.resize-handle');
+  }
+
   function handleColumnMouseDown(columnKey: string, event: MouseEvent) {
     if (event.button !== 0) return; // 왼쪽 버튼만
     if (event.ctrlKey || event.metaKey || event.shiftKey) return; // Ctrl/Shift는 클릭 핸들러에서 처리
     
     // 리사이즈 핸들 영역인지 확인
     const target = event.target as HTMLElement;
-    if (target.classList.contains('resize-handle') || target.closest('.resize-handle')) {
+    if (isResizeHandle(target)) {
       return; // 리사이즈 핸들은 드래그에서 제외
     }
     
@@ -2595,7 +2763,7 @@ function toggleChildArrayExpansion(rowId: string, columnKey: string) {
   // 컨텍스트 메뉴 핸들러
   function handleContextMenu(
     event: MouseEvent,
-    target: { type: 'column' | 'row' | 'cell' | 'group' | 'header-empty'; key?: string; rowId?: string; groupKey?: string }
+    target: { type: 'column' | 'row' | 'cell' | 'group' | 'header-empty' | 'row-header'; key?: string; rowId?: string; groupKey?: string }
   ) {
     event.preventDefault();
     event.stopPropagation();
@@ -2640,6 +2808,21 @@ function toggleChildArrayExpansion(rowId: string, columnKey: string) {
         { divider: true },
         { label: '이름 변경', icon: 'edit', action: () => renameColumn(target.key!) },
         { divider: true },
+        { label: '중복행 찾기', icon: 'search', action: () => {
+          // 선택된 열들을 전달 (없으면 현재 열만)
+          const columnsToUse = selectedColumns.size > 0 && selectedColumns.has(target.key!)
+            ? Array.from(selectedColumns)
+            : [target.key!];
+          findDuplicates(columnsToUse);
+        }},
+        { label: '중복행 제거', icon: 'delete_sweep', action: () => {
+          // 선택된 열들을 전달 (없으면 현재 열만)
+          const columnsToUse = selectedColumns.size > 0 && selectedColumns.has(target.key!)
+            ? Array.from(selectedColumns)
+            : [target.key!];
+          openRemoveDuplicatesDialog(columnsToUse);
+        }},
+        { divider: true },
         { label: '열 삭제', icon: 'delete', action: () => deleteColumn(target.key!) }
       );
       
@@ -2657,6 +2840,8 @@ function toggleChildArrayExpansion(rowId: string, columnKey: string) {
         { label: '위에 행 추가', icon: 'add', action: () => addRow('above', target.rowId) },
         { label: '아래에 행 추가', icon: 'add', action: () => addRow('below', target.rowId) },
         { divider: true },
+        { label: '중복행 제거', icon: 'delete_sweep', action: () => openRemoveDuplicatesDialog() },
+        { divider: true },
         { label: '행 삭제', icon: 'delete', action: () => deleteRow(target.rowId!) }
       );
     } else if (target.type === 'cell' && target.rowId) {
@@ -2664,11 +2849,17 @@ function toggleChildArrayExpansion(rowId: string, columnKey: string) {
         { label: '위에 행 추가', icon: 'add', action: () => addRow('above', target.rowId) },
         { label: '아래에 행 추가', icon: 'add', action: () => addRow('below', target.rowId) },
         { divider: true },
+        { label: '중복행 제거', icon: 'delete_sweep', action: () => openRemoveDuplicatesDialog() },
+        { divider: true },
         { label: '행 삭제', icon: 'delete', action: () => deleteRow(target.rowId!) }
       );
     } else if (target.type === 'header-empty') {
       items.push(
         { label: '마지막에 열 추가', icon: 'add', action: () => addColumnAtEnd() }
+      );
+    } else if (target.type === 'row-header') {
+      items.push(
+        { label: '중복행 제거', icon: 'delete_sweep', action: () => openRemoveDuplicatesDialog() }
       );
     }
 
@@ -2766,6 +2957,9 @@ $: if (data && displayColumns) {
         <div
           class="table-cell header-cell row-number-header"
           style={`grid-column: 1 / 2; grid-row: 1 / ${headerDepth + 1}; display: flex; justify-content: center; font-size: 1rem`}
+          role="rowheader"
+          tabindex="-1"
+          on:contextmenu={(e) => handleContextMenu(e, { type: 'row-header' })}
         >
           #
         </div>
@@ -2786,7 +2980,12 @@ $: if (data && displayColumns) {
                 }
                 handleContextMenu(e, { type: 'column', key: col.key });
               }}
-              on:mousedown={(e) => handleColumnMouseDown(col.key, e)}
+              on:mousedown={(e) => {
+                const target = e.target;
+                if (target && !isResizeHandle(target)) {
+                  handleColumnMouseDown(col.key, e);
+                }
+              }}
             >
               <div class="header-content">
                 <span
@@ -2824,7 +3023,11 @@ $: if (data && displayColumns) {
                 class="resize-handle"
                 role="button"
                 tabindex="0"
-                on:mousedown={(e) => startResize(col.key, e)}
+                on:mousedown={(e) => {
+                  e.stopPropagation();
+                  e.preventDefault();
+                  startResize(col.key, e);
+                }}
               ></div>
             </div>
           {:else}
@@ -2845,7 +3048,13 @@ $: if (data && displayColumns) {
     {:else}
       <!-- 1층 헤더 구조 (flat 데이터) -->
       <div class="table-row header-row" style="margin-left: {ROW_NUMBER_WIDTH}px;">
-        <div class="table-cell header-cell" style="position: fixed; width: {ROW_NUMBER_WIDTH}px;">#</div>
+        <div 
+          class="table-cell header-cell" 
+          style="position: fixed; width: {ROW_NUMBER_WIDTH}px;"
+          role="rowheader"
+          tabindex="-1"
+          on:contextmenu={(e) => handleContextMenu(e, { type: 'row-header' })}
+        >#</div>
         {#each flatColumns as column}
           {@const columnMeta = displayColumnMeta.get(column.key)}
           <div 
@@ -2861,7 +3070,12 @@ $: if (data && displayColumns) {
               }
               handleContextMenu(e, { type: 'column', key: column.key });
             }}
-            on:mousedown={(e) => handleColumnMouseDown(column.key, e)}
+            on:mousedown={(e) => {
+              const target = e.target;
+              if (target && !isResizeHandle(target)) {
+                handleColumnMouseDown(column.key, e);
+              }
+            }}
           >
             <div class="header-content">
                 <span
@@ -2899,7 +3113,11 @@ $: if (data && displayColumns) {
               class="resize-handle"
               role="button"
               tabindex="0"
-              on:mousedown={(e) => startResize(column.key, e)}
+              on:mousedown={(e) => {
+                e.stopPropagation();
+                e.preventDefault();
+                startResize(column.key, e);
+              }}
             ></div>
           </div>
         {/each}
@@ -2915,7 +3133,8 @@ $: if (data && displayColumns) {
       {@const slotCount = rowDisplaySlotCount.get(row.id) ?? 1}
       {@const rowBlockHeight = rowHeights[rowIndex] ?? slotCount * rowHeight}
       {@const originalIndex = originalRowIndexMap.get(row.id) ?? -1}
-      <div class="table-row" style="height: {rowBlockHeight}px;">
+      {@const isDuplicate = duplicateRowIds.has(row.id)}
+      <div class="table-row {isDuplicate ? 'duplicate-row' : ''}" style="height: {rowBlockHeight}px;">
         <div
           class="table-cell row-number merged"
           style="width: {ROW_NUMBER_WIDTH}px;"
@@ -3052,6 +3271,17 @@ $: if (data && displayColumns) {
   onClose={handleTransformClose}
 />
 
+<RemoveDuplicatesDialog
+  show={showRemoveDuplicatesDialog}
+  {data}
+  targetRows={dialogTargetRows}
+  targetIsFiltered={dialogTargetIsFiltered}
+  targetFilteredResultEmpty={dialogTargetFilteredEmpty}
+  preselectedColumns={removeDuplicatesPreselectedColumns}
+  onApply={handleRemoveDuplicatesApply}
+  onClose={handleRemoveDuplicatesClose}
+/>
+
 {#if contextMenu}
   <ContextMenu
     x={contextMenu.x}
@@ -3126,6 +3356,15 @@ $: if (data && displayColumns) {
 
   .table-row:hover {
     background: var(--bg-secondary);
+  }
+
+  .table-row.duplicate-row {
+    background: rgba(0, 122, 255, 0.08);
+    /* border-left: 3px solid var(--accent); */
+  }
+
+  .table-row.duplicate-row:hover {
+    background: rgba(0, 122, 255, 0.12);
   }
 
   .spacer {
@@ -3276,7 +3515,8 @@ $: if (data && displayColumns) {
     width: 4px;
     cursor: col-resize;
     background: transparent;
-    z-index: 1;
+    z-index: 10;
+    pointer-events: auto;
   }
 
   .resize-handle:hover {

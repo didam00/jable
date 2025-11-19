@@ -587,35 +587,21 @@ export function executeFunctionSync(
         processedCode = `${COLUMN_ACCESSOR_PREAMBLE}\n${processedCode}`;
       }
       
-      // 단일 값 변환 모드: return; (명시적으로 undefined 반환) 시 행 삭제
-      // return이 없으면 기존값 유지
+      // 단일 값 변환 모드: 반환값이 없거나 undefined/void면 행 삭제
       let finalCode = processedCode;
-      
-      // return 키워드가 있는지 확인 (명시적 반환 여부)
-      const hasExplicitReturn = /\breturn\b/.test(finalCode);
-      
+
       const singleVariableName = getValidIdentifier(options?.singleVariableName, 'a');
       const missingColumnHandler = (columnKey: string): never => {
         throw new Error(`${columnKey} 열을 찾을 수 없습니다`);
       };
       const func = new Function(singleVariableName, '__rowData', '__missingColumn', finalCode);
       const result = func(value, rowData, missingColumnHandler);
-      
-      // 명시적으로 return이 있고 결과가 undefined면 행 삭제
-      // (return; 또는 return undefined; 같은 경우)
-      if (hasExplicitReturn && result === undefined) {
+
+      if (result === undefined) {
         return {
           success: true,
           result: DELETE_MARKER,
           isDelete: true,
-        };
-      }
-      
-      // return이 없고 결과가 undefined면 기존값 유지
-      if (!hasExplicitReturn && result === undefined) {
-        return {
-          success: true,
-          result: originalValue,
         };
       }
       

@@ -1,10 +1,12 @@
 <script lang="ts">
   import { dataStore } from '../agents/store';
-  import { exportToJSON, parseJSON } from '../agents/parser';
-  import { compressToToon, decompressFromToon } from '../agents/compression/toon';
-  import { compressToEncodedURIComponent, decompressFromEncodedURIComponent } from '../agents/compression/lzString';
   import type { TableData } from '../agents/store';
   import { onMount, createEventDispatcher } from 'svelte';
+  import type {
+    RawViewWorkerActionMap,
+    RawViewWorkerRequest,
+    RawViewWorkerResponse,
+  } from '../agents/workers/rawViewWorker.types';
 
   const dispatch = createEventDispatcher<{
     navigateToCell: { rowId: string; columnKey: string };
@@ -18,7 +20,9 @@
     metadata: { rowCount: 0, columnCount: 0, isFlat: true },
   };
 
-  let displayFormat: 'toon' | 'json' | 'compressed' = 'toon';
+  type DisplayFormat = 'toon' | 'json' | 'compressed';
+
+  let displayFormat: DisplayFormat = 'toon';
   let jsonString = '';
   let compressedString = '';
   let editorContent = '';
@@ -26,20 +30,130 @@
   let textarea: HTMLTextAreaElement;
   let updateTimeout: ReturnType<typeof setTimeout> | null = null;
   let isUpdatingFromStore = false;
-  let isLoading = false;
-  let isRendering = false;
+  let isLoading = true;
   let lastDataHash = '';
   let isInitialized = false;
   let compressedLength = 0;
   let exceedsUrlLimit = false;
   const URL_CHAR_LIMIT = 2000;
 
+  type WorkerHandlers = {
+    resolve: (value: unknown) => void;
+    reject: (reason: Error) => void;
+  };
+
+  let worker: Worker | null = null;
+  let workerRequestId = 0;
+  let isWorkerReady = false;
+  const pendingWorkerRequests = new Map<string, WorkerHandlers>();
+  const CANCELLATION_ERROR_NAME = 'RawViewCancelError';
+  let hasInitializedFormatReaction = false;
+
   // 데이터 해시 계산 (간단한 버전)
   function calculateDataHash(data: TableData): string {
     return `${data.metadata.rowCount}-${data.metadata.columnCount}-${data.columns.length}-${data.rows.length}`;
   }
 
+  function setupWorker() {
+    if (worker) return;
+
+    worker = new Worker(new URL('../agents/workers/rawViewWorker.ts', import.meta.url), {
+      type: 'module',
+    });
+
+    worker.onmessage = (event: MessageEvent<RawViewWorkerResponse>) => {
+      const { id, result, error } = event.data;
+      const pending = pendingWorkerRequests.get(id);
+      if (!pending) {
+        return;
+      }
+      pendingWorkerRequests.delete(id);
+      if (error) {
+        pending.reject(new Error(error));
+      } else {
+        pending.resolve(result);
+      }
+    };
+
+    worker.onerror = (event: ErrorEvent) => {
+      const message = event.message ?? 'RawView 워커에서 오류가 발생했습니다.';
+      pendingWorkerRequests.forEach(({ reject }) => reject(new Error(message)));
+      pendingWorkerRequests.clear();
+    };
+
+    isWorkerReady = true;
+    updateJSON();
+  }
+
+  function disposeWorker() {
+    if (!worker) return;
+    worker.terminate();
+    worker = null;
+    isWorkerReady = false;
+    pendingWorkerRequests.forEach(({ reject }) =>
+      reject(new Error('RawView 워커가 종료되었습니다.')),
+    );
+    pendingWorkerRequests.clear();
+  }
+
+  function runWorkerTask<TAction extends keyof RawViewWorkerActionMap>(
+    action: TAction,
+    payload: RawViewWorkerActionMap[TAction]['payload'],
+  ): Promise<RawViewWorkerActionMap[TAction]['result']> {
+    return new Promise((resolve, reject) => {
+      if (!worker) {
+        reject(new Error('RawView 워커가 초기화되지 않았습니다.'));
+        return;
+      }
+      const id = `task-${workerRequestId++}`;
+      pendingWorkerRequests.set(id, {
+        resolve: (value) => resolve(value as RawViewWorkerActionMap[TAction]['result']),
+        reject,
+      });
+
+      const request: RawViewWorkerRequest<TAction> = {
+        id,
+        action,
+        payload,
+      };
+
+      worker.postMessage(request);
+    });
+  }
+
+  function cancelPendingRequests(reason = '작업이 취소되었습니다.') {
+    if (pendingWorkerRequests.size === 0) return;
+    const error = new Error(reason);
+    error.name = CANCELLATION_ERROR_NAME;
+    pendingWorkerRequests.forEach(({ reject }) => reject(error));
+    pendingWorkerRequests.clear();
+  }
+
+  function clearUpdateTimeout() {
+    if (updateTimeout) {
+      clearTimeout(updateTimeout);
+      updateTimeout = null;
+    }
+  }
+
+  function cancelActiveOperations(reason = '작업이 취소되었습니다.') {
+    clearUpdateTimeout();
+    cancelPendingRequests(reason);
+    isLoading = false;
+  }
+
+  function isCancellationError(error: unknown): boolean {
+    return error instanceof Error && error.name === CANCELLATION_ERROR_NAME;
+  }
+
+  function handleDisplayFormatChange(format: DisplayFormat) {
+    if (displayFormat === format) return;
+    cancelActiveOperations('뷰 전환으로 기존 작업을 취소했습니다.');
+    displayFormat = format;
+  }
+
   onMount(() => {
+    setupWorker();
     const unsubscribe = dataStore.subscribe((value) => {
       data = value;
       if (!isUpdatingFromStore) {
@@ -53,11 +167,15 @@
       }
     });
 
-    return unsubscribe;
+    return () => {
+      unsubscribe();
+      cancelActiveOperations('RawView가 언마운트되어 작업을 취소했습니다.');
+      disposeWorker();
+    };
   });
 
   async function updateJSON() {
-    if (isLoading || isRendering) return;
+    if (!isWorkerReady || isLoading) return;
 
     try {
       isLoading = true;
@@ -65,22 +183,13 @@
 
       let content = '';
 
-      const toonContent = await new Promise<string>((resolve) => {
-        requestIdleCallback(() => {
-          const result = compressToToon(data);
-          resolve(result);
-        }, { timeout: 100 });
-      });
+      const toonContent = await runWorkerTask('compressToon', data);
 
       if (displayFormat === 'json') {
-        content = await new Promise<string>((resolve) => {
-          requestIdleCallback(() => {
-            resolve(exportToJSON(data));
-          }, { timeout: 100 });
-        });
+        content = await runWorkerTask('exportJSON', data);
         jsonString = content;
       } else if (displayFormat === 'compressed') {
-        const compressed = compressToEncodedURIComponent(toonContent);
+        const compressed = await runWorkerTask('compressURI', toonContent);
         compressedLength = compressed.length;
         exceedsUrlLimit = compressedLength > URL_CHAR_LIMIT;
         compressedString = formatCompressedForDisplay(compressed);
@@ -90,16 +199,11 @@
       }
 
       editorContent = content;
-
-      // 텍스트 렌더링도 청크 단위로 처리
-      if (textarea && content) {
-        isUpdatingFromStore = true;
-        await renderTextChunked(content);
-        isUpdatingFromStore = false;
-      }
-      
       isLoading = false;
     } catch (e) {
+      if (isCancellationError(e)) {
+        return;
+      }
       error = e instanceof Error ? e.message : 'Unknown error';
       isLoading = false;
     }
@@ -107,94 +211,45 @@
   
   // displayFormat 변경 시 업데이트
   $: if (displayFormat !== undefined) {
+    if (hasInitializedFormatReaction) {
+      cancelActiveOperations('뷰 전환으로 기존 작업을 취소했습니다.');
+    }
+    hasInitializedFormatReaction = true;
     updateJSON();
   }
 
-  async function renderTextChunked(text: string) {
-    if (isRendering || !textarea) return;
-    
-    isRendering = true;
-    const CHUNK_SIZE = 50000; // 약 50KB씩 처리
-    
-    if (text.length <= CHUNK_SIZE) {
-      // 작은 텍스트는 즉시 렌더링
-      textarea.value = text;
-      isRendering = false;
-      return;
-    }
-    
-    // 큰 텍스트는 청크 단위로 렌더링
-    textarea.value = ''; // 먼저 초기화
-    
-    let currentPos = 0;
-    
-    const renderChunk = (): Promise<void> => {
-      return new Promise((resolve) => {
-        requestIdleCallback(() => {
-          const chunk = text.substring(currentPos, currentPos + CHUNK_SIZE);
-          textarea.value += chunk;
-          currentPos += CHUNK_SIZE;
-          
-          if (currentPos < text.length) {
-            // 다음 청크를 약간의 지연 후 처리 (UI 반응성 유지)
-            setTimeout(() => {
-              renderChunk().then(resolve);
-            }, 10);
-          } else {
-            isRendering = false;
-            resolve();
-          }
-        }, { timeout: 50 });
-      });
-    };
-    
-    await renderChunk();
-  }
-
-  // 하이라이트 함수들 비활성화 - 성능 최적화
-  // 하이라이트 기능이 렌더링 성능에 큰 영향을 주므로 제거됨
-
-  // 하이라이트 기능 비활성화 - 성능 최적화
-
-
-  function handleInput() {
-    if (isUpdatingFromStore) return;
+  async function handleInput() {
+    if (isUpdatingFromStore || !isWorkerReady) return;
 
     const inputValue = editorContent;
 
     try {
       if (displayFormat === 'toon') {
-        // TOON 형식 파싱
-        try {
-          const tableData = decompressFromToon(inputValue);
-          error = null;
-          const compressed = compressToEncodedURIComponent(inputValue);
-          compressedString = formatCompressedForDisplay(compressed);
-          compressedLength = compressed.length;
-          exceedsUrlLimit = compressedLength > URL_CHAR_LIMIT;
+        const tableData = await runWorkerTask('decompressToon', inputValue);
+        error = null;
+        const compressed = await runWorkerTask('compressURI', inputValue);
+        compressedString = formatCompressedForDisplay(compressed);
+        compressedLength = compressed.length;
+        exceedsUrlLimit = compressedLength > URL_CHAR_LIMIT;
 
-          // 테이블 데이터로 업데이트
-          if (updateTimeout) {
-            clearTimeout(updateTimeout);
-          }
-          updateTimeout = setTimeout(() => {
-            try {
-              isUpdatingFromStore = true;
-              dataStore.set(tableData);
-              setTimeout(() => {
-                isUpdatingFromStore = false;
-              }, 0);
-            } catch (e) {
-              console.warn('Failed to update table data:', e);
-            }
-          }, 500); // 500ms 디바운스
-        } catch (e) {
-          error = e instanceof Error ? e.message : 'Invalid TOON format';
+        if (updateTimeout) {
+          clearTimeout(updateTimeout);
         }
+        updateTimeout = setTimeout(() => {
+          try {
+            isUpdatingFromStore = true;
+            dataStore.set(tableData);
+            setTimeout(() => {
+              isUpdatingFromStore = false;
+            }, 0);
+          } catch (e) {
+            console.warn('Failed to update table data:', e);
+          }
+        }, 500);
       } else if (displayFormat === 'compressed') {
         const normalized = inputValue.replace(/\s+/g, '');
-        const toonPayload = decompressFromEncodedURIComponent(normalized);
-        const tableData = decompressFromToon(toonPayload);
+        const toonPayload = await runWorkerTask('decompressURI', normalized);
+        const tableData = await runWorkerTask('decompressToon', toonPayload);
         error = null;
         compressedLength = normalized.length;
         exceedsUrlLimit = compressedLength > URL_CHAR_LIMIT;
@@ -216,8 +271,6 @@
           }
         }, 500);
       } else {
-        // JSON 형식 파싱
-        JSON.parse(inputValue); // 유효성 검사만
         error = null;
         jsonString = inputValue;
 
@@ -226,20 +279,26 @@
           clearTimeout(updateTimeout);
         }
         updateTimeout = setTimeout(() => {
-          try {
-            const tableData = parseJSON(jsonString);
-            isUpdatingFromStore = true;
-            dataStore.set(tableData);
-            setTimeout(() => {
-              isUpdatingFromStore = false;
-            }, 0);
-          } catch (e) {
-            // 파싱 실패는 이미 error로 표시됨
-            console.warn('Failed to update table data:', e);
-          }
-        }, 500); // 500ms 디바운스
+          void (async () => {
+            try {
+              isUpdatingFromStore = true;
+              const tableData = await runWorkerTask('parseJSON', jsonString);
+              dataStore.set(tableData);
+            } catch (e) {
+              error = e instanceof Error ? e.message : `Invalid ${displayFormat.toUpperCase()}`;
+              console.warn('Failed to update table data:', e);
+            } finally {
+              setTimeout(() => {
+                isUpdatingFromStore = false;
+              }, 0);
+            }
+          })();
+        }, 500);
       }
     } catch (e) {
+      if (isCancellationError(e)) {
+        return;
+      }
       error = e instanceof Error ? e.message : `Invalid ${displayFormat.toUpperCase()}`;
     }
   }
@@ -516,7 +575,7 @@
       <button
         class="format-btn"
         class:active={displayFormat === 'toon'}
-        on:click={() => { displayFormat = 'toon'; }}
+        on:click={() => handleDisplayFormatChange('toon')}
         title="TOON 형식 (압축, 빠름)"
       >
         TOON
@@ -524,7 +583,7 @@
       <button
         class="format-btn"
         class:active={displayFormat === 'json'}
-        on:click={() => { displayFormat = 'json'; }}
+        on:click={() => handleDisplayFormatChange('json')}
         title="JSON 형식 (읽기 쉬움)"
       >
         JSON
@@ -532,7 +591,7 @@
       <button
         class="format-btn"
         class:active={displayFormat === 'compressed'}
-        on:click={() => { displayFormat = 'compressed'; }}
+        on:click={() => handleDisplayFormatChange('compressed')}
         title="압축 문자열 (URL 공유)"
       >
         Compressed
@@ -554,6 +613,18 @@
   </div>
   <div class="json-editor-wrapper">
     <pre class="json-highlight" aria-hidden="true"></pre>
+    {#if isLoading}
+      <div class="editor-loading-overlay">
+        <div class="spinner" aria-hidden="true"></div>
+        <div class="loading-text">
+          {displayFormat === 'json'
+            ? 'JSON 불러오는 중...'
+            : displayFormat === 'toon'
+            ? 'TOON 데이터 준비 중...'
+            : '압축 데이터 변환 중...'}
+        </div>
+      </div>
+    {/if}
     <textarea
       class="json-editor"
       bind:this={textarea}
@@ -644,6 +715,44 @@
     position: relative;
     flex: 1;
     overflow: hidden;
+  }
+
+  .editor-loading-overlay {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    background: color-mix(in srgb, var(--bg-primary) 85%, transparent);
+    z-index: 3;
+  }
+
+  .spinner {
+    width: 24px;
+    height: 24px;
+    border: 2px solid color-mix(in srgb, var(--text-secondary) 60%, transparent);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.9s linear infinite;
+  }
+
+  .loading-text {
+    font-size: 0.9rem;
+    color: var(--text-secondary);
+  }
+
+  @keyframes spin {
+    from {
+      transform: rotate(0deg);
+    }
+    to {
+      transform: rotate(360deg);
+    }
   }
 
   .json-highlight {

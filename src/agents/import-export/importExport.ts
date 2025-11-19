@@ -279,14 +279,26 @@ async function readBinarySource(
     if (!file.path || typeof file.path !== 'string') {
       throw new Error('파일 경로가 유효하지 않습니다.');
     }
-    const fsModule = await import('@tauri-apps/plugin-fs');
-    const { readFile } = fsModule as {
-      readFile: (path: string) => Promise<Uint8Array | number[]>;
-    };
-    const raw = await readFile(file.path);
-    const buffer = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
-    onChunk?.(buffer.length, buffer.length);
-    return buffer;
+    try {
+      const fsModule = await import('@tauri-apps/plugin-fs');
+      const { readFile } = fsModule as {
+        readFile: (path: string) => Promise<Uint8Array | number[]>;
+      };
+      const raw = await readFile(file.path);
+      const buffer = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
+      onChunk?.(buffer.length, buffer.length);
+      return buffer;
+    } catch (error) {
+      const errorMessage = error instanceof Error 
+        ? error.message 
+        : (typeof error === 'string' ? error : String(error) || '파일을 읽을 수 없습니다.');
+      console.error('[readBinarySource] Tauri 파일 읽기 실패:', {
+        path: file.path,
+        error: errorMessage,
+        errorObject: error
+      });
+      throw new Error(`파일을 읽을 수 없습니다: ${errorMessage}`);
+    }
   }
   if (file instanceof File) {
     return readBrowserFile(file, onChunk);

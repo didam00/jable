@@ -9,9 +9,18 @@
   export let totalRows = 0;
   export let searchCount = 0;
   export let hasData = false;
+  export let duplicateInfo: {
+    columns: string[];
+    groups: number;
+    totalDuplicates: number;
+    isFiltered: boolean;
+  } | null = null;
 
   const dispatch = createEventDispatcher<{
     changeEncoding: { encoding: string };
+    findDuplicates: { columns: string[] };
+    clearDuplicateFilter: void;
+    removeDuplicates: { columns: string[] };
   }>();
   let menuOpen = false;
 
@@ -81,6 +90,30 @@
     <span>검색</span>
     <strong>{hasData ? searchCount.toLocaleString() : "—"}</strong>
   </div>
+  {#if duplicateInfo && duplicateInfo.columns.length > 0 && duplicateInfo.groups > 0}
+    <div class="status-item duplicate-info">
+      <span>중복</span>
+      <strong class="duplicate-count">
+        {duplicateInfo.groups}그룹 ({duplicateInfo.totalDuplicates}행)
+      </strong>
+      {#if duplicateInfo.isFiltered}
+        <button
+          class="duplicate-action-btn"
+          on:click|stopPropagation={() => dispatch('clearDuplicateFilter')}
+          title="중복 필터 해제"
+        >
+          <span class="material-icons">close</span>
+        </button>
+      {/if}
+      <button
+        class="duplicate-action-btn"
+        on:click|stopPropagation={() => dispatch('removeDuplicates', { columns: duplicateInfo.columns })}
+        title="중복행 제거"
+      >
+        <span class="material-icons">delete_sweep</span>
+      </button>
+    </div>
+  {/if}
 </div>
 
 <style>
@@ -153,5 +186,36 @@
   .encoding-menu button.selected {
     background: var(--bg-secondary);
     color: var(--accent);
+  }
+
+  .duplicate-info {
+    gap: 0.5rem;
+  }
+
+  .duplicate-count {
+    color: var(--accent);
+  }
+
+  .duplicate-action-btn {
+    border: none;
+    background: transparent;
+    padding: 0.25rem;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-secondary);
+    border-radius: 4px;
+    transition: all 0.2s;
+    margin-left: 0.25rem;
+  }
+
+  .duplicate-action-btn:hover {
+    background: var(--bg-tertiary);
+    color: var(--accent);
+  }
+
+  .duplicate-action-btn .material-icons {
+    font-size: 16px;
   }
 </style>

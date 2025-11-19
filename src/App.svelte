@@ -53,6 +53,12 @@ let tableState: {
   filters: Record<string, string>;
   filteredRowCount: number;
   totalRowCount: number;
+  duplicateInfo?: {
+    columns: string[];
+    groups: number;
+    totalDuplicates: number;
+    isFiltered: boolean;
+  };
 } = {
   sortColumn: null,
   sortDirection: 'asc',
@@ -1173,7 +1179,10 @@ async function handleSave() {
                         await handleFileDrop({ path: file.path, name: file.name });
                       } catch (error) {
                         console.error('[recentFileClick] 파일 열기 실패:', error);
-                        alert(`파일을 열 수 없습니다: ${error instanceof Error ? error.message : 'Unknown error'}`);
+                        const errorMessage = error instanceof Error 
+                          ? error.message 
+                          : (typeof error === 'string' ? error : String(error) || '알 수 없는 오류가 발생했습니다.');
+                        alert(`파일을 열 수 없습니다: ${errorMessage}`);
                       }
                     }}
                     title={file.path}
@@ -1318,7 +1327,27 @@ async function handleSave() {
     totalRows={tableState.totalRowCount || data.metadata.rowCount}
     searchCount={searchMatchCount}
     hasData={data.rows.length > 0 || data.columns.length > 0}
+    duplicateInfo={tableState.duplicateInfo || null}
     on:changeEncoding={(e) => handleEncodingChangeRequest(e.detail.encoding)}
+    on:findDuplicates={(e) => {
+      if (tableViewRef?.findDuplicates) {
+        tableViewRef.findDuplicates(e.detail.columns);
+      }
+    }}
+    on:clearDuplicateFilter={() => {
+      if (tableViewRef?.clearDuplicateFilter) {
+        tableViewRef.clearDuplicateFilter();
+      }
+    }}
+    on:removeDuplicates={(e) => {
+      if (tableViewRef) {
+        // 중복행 제거 다이얼로그 열기
+        const openDialog = tableViewRef.openRemoveDuplicatesDialog;
+        if (openDialog) {
+          openDialog(e.detail.columns);
+        }
+      }
+    }}
   />
 </div>
 
