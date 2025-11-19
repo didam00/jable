@@ -9,6 +9,8 @@
 
   const dispatch = createEventDispatcher();
 
+  export let isStreamingMode = false;
+
   let query = '';
   let useRegex = false;
   let results: SearchResult[] = [];
@@ -18,16 +20,22 @@
     metadata: { rowCount: 0, columnCount: 0, isFlat: true },
   };
   let searchInput: HTMLInputElement;
+  let pendingSearch = false; // 스트리밍 모드에서 검색 대기 중인지 표시
 
   dataStore.subscribe((value) => {
     data = value;
-    if (query) {
+    if (query && !isStreamingMode) {
       performSearch();
+    } else if (query && isStreamingMode && pendingSearch) {
+      performSearch();
+      pendingSearch = false;
     }
   });
 
-  // query가 변경될 때마다 즉시 검색 실행
-  $: query, performSearch();
+  // query가 변경될 때마다 검색 실행 (스트리밍 모드가 아닐 때만)
+  $: if (!isStreamingMode) {
+    performSearch();
+  }
 
   onMount(() => {
     function handleGlobalKeydown(event: KeyboardEvent) {
@@ -82,6 +90,25 @@
         matchedRowIds: new Set<string>(),
         filteredColumnKeys: null,
       });
+      return;
+    }
+    
+    // 스트리밍 모드에서 Enter 또는 & 입력 시 검색 실행
+    if (isStreamingMode) {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        performSearch();
+      } else if (event.key === '&' && !event.shiftKey) {
+        // & 입력 시 검색 실행 (&가 query에 추가된 후 실행되도록 지연)
+        setTimeout(() => performSearch(), 10);
+      }
+    }
+  }
+
+  function handleBlur() {
+    // 스트리밍 모드에서 focus out 시 검색 실행
+    if (isStreamingMode && query.trim()) {
+      performSearch();
     }
   }
 
@@ -180,9 +207,10 @@
     bind:this={searchInput}
     type="text"
     class="search-input"
-    placeholder="검색... (Ctrl+G/F: 포커스, Esc: 닫기)"
+    placeholder={isStreamingMode ? "검색... (Enter/&/포커스 해제: 검색, Ctrl+G/F: 포커스, Esc: 닫기)" : "검색... (Ctrl+G/F: 포커스, Esc: 닫기)"}
     bind:value={query}
     on:keydown={handleKeydown}
+    on:blur={handleBlur}
   />
   <button
     class="regex-toggle"

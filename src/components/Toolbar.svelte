@@ -17,6 +17,8 @@
     pasteImport: { data: TableData };
   }>();
 
+  export let isStreamingMode = false;
+
   let fileInput: HTMLInputElement;
   let canUndo = false;
   let canRedo = false;
@@ -164,7 +166,7 @@
       <span class="material-icons">redo</span>
     </button>
   </div>
-  <SearchBar on:searchChange={(e) => dispatch('searchChange', e.detail)} />
+  <SearchBar {isStreamingMode} on:searchChange={(e) => dispatch('searchChange', e.detail)} />
   <div class="toolbar-right" class:open={isMenuOpen}>
     <span style="white-space: nowrap;" >export as</span>
     <button class="btn" on:click={() => handleExport('toon')}>TOON</button><span class="split">|</span>

@@ -302,20 +302,43 @@ class DataStore {
   }
 
   merge(newData: TableData): TableData {
-    if (!this.currentData) {
-      this.store.subscribe((data) => {
-        this.currentData = data;
-      })();
+    // this.currentData를 직접 사용하되, 없으면 store에서 동기적으로 가져오기
+    let current: TableData;
+    if (this.currentData) {
+      current = this.currentData;
+    } else {
+      // store에서 현재 값을 동기적으로 가져오기 (subscribe를 즉시 호출하고 구독 해제)
+      let syncData: TableData | null = null;
+      const unsubscribe = this.store.subscribe((value) => {
+        syncData = value;
+      });
+      unsubscribe();
+      current = syncData || {
+        columns: [],
+        rows: [],
+        metadata: { rowCount: 0, columnCount: 0, isFlat: true },
+      };
+      this.currentData = current;
     }
 
-    if (!this.currentData || this.currentData.rows.length === 0) {
+    if (!current || current.rows.length === 0) {
       return newData;
     }
 
-    const newColumns = this.buildCombinedColumns(this.currentData.columns, newData.columns);
+    // 현재 데이터를 복사하여 사용 (순환 참조 방지)
+    const currentCopy: TableData = {
+      columns: current.columns.map(col => ({ ...col })),
+      rows: current.rows.map(row => ({
+        id: row.id,
+        cells: { ...row.cells }
+      })),
+      metadata: { ...current.metadata }
+    };
+
+    const newColumns = this.buildCombinedColumns(currentCopy.columns, newData.columns);
 
     // 행 병합 (모든 행 추가)
-    const mergedRows = [...this.currentData.rows];
+    const mergedRows = [...currentCopy.rows];
     const maxRowId = Math.max(
       ...mergedRows.map((row) => {
         const match = row.id.match(/row_(\d+)/);
@@ -330,7 +353,7 @@ class DataStore {
         cells: { ...row.cells },
       };
       // 기존 컬럼에 대한 빈 셀 추가
-      this.currentData!.columns.forEach((col) => {
+      currentCopy.columns.forEach((col) => {
         if (!newRow.cells[col.key]) {
           newRow.cells[col.key] = { value: '', type: 'string' };
         }
@@ -344,7 +367,7 @@ class DataStore {
       metadata: {
         rowCount: mergedRows.length,
         columnCount: newColumns.length,
-        isFlat: this.currentData.metadata.isFlat && newData.metadata.isFlat,
+        isFlat: currentCopy.metadata.isFlat && newData.metadata.isFlat,
       },
     };
 
