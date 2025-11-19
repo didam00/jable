@@ -325,47 +325,72 @@ class DataStore {
       return newData;
     }
 
+    // 대용량 데이터 처리를 위한 최적화
+    const isLargeData = current.rows.length > 100000 || newData.rows.length > 100000;
+
     // 현재 데이터를 복사하여 사용 (순환 참조 방지)
-    const currentCopy: TableData = {
-      columns: current.columns.map(col => ({ ...col })),
-      rows: current.rows.map(row => ({
-        id: row.id,
-        cells: { ...row.cells }
-      })),
-      metadata: { ...current.metadata }
-    };
+    // 대용량 데이터는 얕은 복사로 처리하여 메모리 사용 최적화
+    const currentCopy: TableData = isLargeData
+      ? {
+          columns: current.columns.map(col => ({ ...col })),
+          rows: current.rows.slice(), // slice()로 얕은 복사 (스택 오버플로우 방지)
+          metadata: { ...current.metadata }
+        }
+      : {
+          columns: current.columns.map(col => ({ ...col })),
+          rows: current.rows.map(row => ({
+            id: row.id,
+            cells: { ...row.cells }
+          })),
+          metadata: { ...current.metadata }
+        };
 
     const newColumns = this.buildCombinedColumns(currentCopy.columns, newData.columns);
 
     // 행 병합 (모든 행 추가)
-    const mergedRows = [...currentCopy.rows];
-    const maxRowId = Math.max(
-      ...mergedRows.map((row) => {
-        const match = row.id.match(/row_(\d+)/);
-        return match ? parseInt(match[1], 10) : 0;
-      }),
-      0
-    );
+    // 스프레드 연산자 대신 slice() 사용 (스택 오버플로우 방지)
+    const mergedRows = currentCopy.rows.slice();
 
-    newData.rows.forEach((row, index) => {
+    // Math.max(...array) 대신 반복문으로 최대값 찾기 (스택 오버플로우 방지)
+    let maxRowId = 0;
+    for (let i = 0; i < mergedRows.length; i++) {
+      const row = mergedRows[i];
+      const match = row.id.match(/row_(\d+)/);
+      if (match) {
+        const idNum = parseInt(match[1], 10);
+        if (idNum > maxRowId) {
+          maxRowId = idNum;
+        }
+      }
+    }
+
+    // 새 데이터 행 추가
+    // 대용량 데이터는 배치 처리로 메모리 사용 최적화
+    const newRows: Row[] = [];
+    for (let index = 0; index < newData.rows.length; index++) {
+      const row = newData.rows[index];
       const newRow: Row = {
         id: `row_${maxRowId + index + 1}`,
         cells: { ...row.cells },
       };
       // 기존 컬럼에 대한 빈 셀 추가
-      currentCopy.columns.forEach((col) => {
+      for (let colIdx = 0; colIdx < currentCopy.columns.length; colIdx++) {
+        const col = currentCopy.columns[colIdx];
         if (!newRow.cells[col.key]) {
           newRow.cells[col.key] = { value: '', type: 'string' };
         }
-      });
-      mergedRows.push(newRow);
-    });
+      }
+      newRows.push(newRow);
+    }
+
+    // 배열 병합 (concat 사용하여 스택 오버플로우 방지)
+    const finalRows = mergedRows.concat(newRows);
 
     const merged: TableData = {
       columns: newColumns,
-      rows: mergedRows,
+      rows: finalRows,
       metadata: {
-        rowCount: mergedRows.length,
+        rowCount: finalRows.length,
         columnCount: newColumns.length,
         isFlat: currentCopy.metadata.isFlat && newData.metadata.isFlat,
       },
