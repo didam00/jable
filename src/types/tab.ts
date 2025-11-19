@@ -16,6 +16,8 @@ export interface Tab {
   fileFormat?: 'json' | 'csv' | 'xml' | 'toon'; // 원본 파일 형식 저장
   encoding?: string;
   binarySource?: Uint8Array | null;
+  fileSize?: number; // 파일 크기 (bytes)
+  isStreamingMode?: boolean; // 스트리밍 모드로 로드되었는지 여부
   history?: HistoryState[]; // 탭별 히스토리
   historyIndex?: number; // 현재 히스토리 인덱스
 }

@@ -9,12 +9,22 @@
   export let totalRows = 0;
   export let searchCount = 0;
   export let hasData = false;
+  export let fileSize: number | undefined = undefined;
+  export let isStreamingMode = false;
   export let duplicateInfo: {
     columns: string[];
     groups: number;
     totalDuplicates: number;
     isFiltered: boolean;
   } | null = null;
+
+  function formatFileSize(bytes: number | undefined): string {
+    if (!bytes) return '—';
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+    return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+  }
 
   const dispatch = createEventDispatcher<{
     changeEncoding: { encoding: string };
@@ -52,6 +62,18 @@
 </script>
 
 <div class="status-bar">
+  {#if isStreamingMode}
+    <div class="status-item streaming-mode" title="스트리밍 모드로 로드됨">
+      <span class="material-icons streaming-icon">cloud_download</span>
+      <span>스트리밍</span>
+    </div>
+  {/if}
+  {#if fileSize !== undefined}
+    <div class="status-item">
+      <span>크기</span>
+      <strong>{formatFileSize(fileSize)}</strong>
+    </div>
+  {/if}
   <button
     type="button"
     class="status-item encoding-control"
@@ -217,5 +239,26 @@
 
   .duplicate-action-btn .material-icons {
     font-size: 16px;
+  }
+
+  .streaming-mode {
+    color: var(--accent);
+    gap: 0.3rem;
+    animation: streaming-mode-pulse 500ms infinite alternate linear;
+    font-weight: 600;
+  }
+  
+  .streaming-icon {
+    font-size: 16px;
+    color: var(--accent);
+  }
+
+  @keyframes streaming-mode-pulse {
+    from {
+      opacity: 1;
+    }
+    to {
+      opacity: 0.6;
+    }
   }
 </style>

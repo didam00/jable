@@ -129,13 +129,15 @@ let lastSaveDirectory = '';
 
   type ImportChoice = 'merge' | 'new-tab' | 'cancel';
   type TabContextAction = 'merge' | 'subtract' | 'intersect' | 'split';
-  interface PendingImport {
-    file: File | { path: string; name: string };
-    data: TableData;
-    format?: 'json' | 'csv' | 'xml' | 'toon';
-    encoding?: string;
-    binarySource?: Uint8Array | null;
-  }
+interface PendingImport {
+  file: File | { path: string; name: string };
+  data: TableData;
+  format?: 'json' | 'csv' | 'xml' | 'toon';
+  encoding?: string;
+  binarySource?: Uint8Array | null;
+  fileSize?: number;
+  isStreamingMode?: boolean;
+}
 
   let importDialogOpen = false;
   let importDialogFileName = '';
@@ -163,13 +165,15 @@ let lastSaveDirectory = '';
   }
 
   function resolveTabData(tab: Tab): TableData {
+    // 레거시 지원: 예전에 압축된 데이터가 있을 수 있음
     if (tab.isCompressed && typeof tab.data === 'string') {
       return decompressFromToon(tab.data);
     }
+    // 일반적인 경우: 문자열이면 파싱, 아니면 복사 또는 직접 참조
     if (typeof tab.data === 'string') {
       return JSON.parse(tab.data);
     }
-    return JSON.parse(JSON.stringify(tab.data));
+    return tab.isStreamingMode ? tab.data : JSON.parse(JSON.stringify(tab.data));
   }
 
 function getFileDisplayName(file: File | { path: string; name: string }): string {
@@ -328,7 +332,9 @@ function requestSaveAsOptions(tab: Tab, format: 'json' | 'csv' | 'xml' | 'toon')
       pending.data,
       pending.format,
       pending.encoding,
-      pending.binarySource ?? null
+      pending.binarySource ?? null,
+      pending.fileSize,
+      pending.isStreamingMode
     );
     switchToTab(tabId);
   }
@@ -443,15 +449,9 @@ function requestSaveAsOptions(tab: Tab, format: 'json' | 'csv' | 'xml' | 'toon')
         if (activeTab) {
           // 데이터 유효성 검사
           if (value && value.rows && Array.isArray(value.rows)) {
-            // 대용량 데이터는 .toon으로 압축하여 저장
-            const shouldCompress = value.rows.length > 1000;
-            if (shouldCompress) {
-              activeTab.data = compressToToon(value);
-              activeTab.isCompressed = true;
-            } else {
-              activeTab.data = JSON.parse(JSON.stringify(value));
-              activeTab.isCompressed = false;
-            }
+            // 압축 제거: 데이터를 직접 참조 또는 복사하여 저장
+            activeTab.data = activeTab.isStreamingMode ? value : JSON.parse(JSON.stringify(value));
+            activeTab.isCompressed = false;
             activeTab.isModified = true;
             
             // 현재 탭의 히스토리도 업데이트
@@ -491,7 +491,9 @@ function requestSaveAsOptions(tab: Tab, format: 'json' | 'csv' | 'xml' | 'toon')
     fileData: TableData,
     fileFormat?: 'json' | 'csv' | 'xml' | 'toon',
     encoding?: string,
-    binarySource?: Uint8Array | null
+    binarySource?: Uint8Array | null,
+    fileSize?: number,
+    isStreamingMode?: boolean
   ): string {
     const tabId = `tab_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
     const fileName = file instanceof File ? file.name : file.name;
@@ -511,7 +513,7 @@ function requestSaveAsOptions(tab: Tab, format: 'json' | 'csv' | 'xml' | 'toon')
       throw new Error('유효하지 않은 데이터입니다.');
     }
     
-    const { payload, compressed } = buildTabDataPayload(fileData);
+    const { payload, compressed } = buildTabDataPayload(fileData, isStreamingMode ?? false);
     
     const newTab: Tab = {
       id: tabId,
@@ -524,6 +526,8 @@ function requestSaveAsOptions(tab: Tab, format: 'json' | 'csv' | 'xml' | 'toon')
       fileFormat: format,
       encoding: encoding || 'utf-8',
       binarySource: binarySource || null,
+      fileSize,
+      isStreamingMode,
     };
     
     tabs = [...tabs, newTab];
@@ -588,6 +592,11 @@ function requestSaveAsOptions(tab: Tab, format: 'json' | 'csv' | 'xml' | 'toon')
           rowsCount: tabData?.rows?.length,
           columnsCount: tabData?.columns?.length
         });
+      } else if (tab.isStreamingMode) {
+        // 스트리밍 모드일 때는 데이터를 직접 사용 (압축하지 않았으므로)
+        tabData = typeof tab.data === 'string' 
+          ? JSON.parse(tab.data) 
+          : tab.data;
       } else {
         tabData = typeof tab.data === 'string' 
           ? JSON.parse(tab.data) 
@@ -734,28 +743,14 @@ function requestSaveAsOptions(tab: Tab, format: 'json' | 'csv' | 'xml' | 'toon')
     });
   }
 
-  function buildTabDataPayload(fileData: TableData): { payload: TableData | string; compressed: boolean } {
-    let shouldCompress = fileData.rows.length > 1000;
-    let payload: TableData | string;
-    try {
-      if (shouldCompress) {
-        console.log(`[buildTabDataPayload] 압축 시작`, {
-          rowsCount: fileData.rows.length,
-          columnsCount: fileData.columns.length,
-        });
-        payload = compressToToon(fileData);
-      } else {
-        payload = JSON.parse(JSON.stringify(fileData));
-      }
-    } catch (error) {
-      console.error(`[buildTabDataPayload] 압축 실패`, {
-        error,
-        errorMessage: error instanceof Error ? error.message : String(error),
-      });
-      payload = JSON.parse(JSON.stringify(fileData));
-      shouldCompress = false;
-    }
-    return { payload, compressed: shouldCompress };
+  function buildTabDataPayload(fileData: TableData, isStreamingMode = false): { payload: TableData | string; compressed: boolean } {
+    // 압축 제거: 압축/해제 과정에서 메모리를 더 사용하고 OutOfMemory 발생 가능
+    // 탭 데이터는 그냥 직접 참조 또는 얕은 복사로 저장
+    // 스트리밍 모드일 때는 직접 참조, 아닐 때는 깊은 복사
+    return { 
+      payload: isStreamingMode ? fileData : JSON.parse(JSON.stringify(fileData)), 
+      compressed: false 
+    };
   }
 
   function updateActiveEncodingState() {
@@ -853,12 +848,16 @@ function requestSaveAsOptions(tab: Tab, format: 'json' | 'csv' | 'xml' | 'toon')
         },
         { encoding: newEncoding, binarySource: tab.binarySource }
       );
-      const { payload, compressed } = buildTabDataPayload(result.data);
+      const { payload, compressed } = buildTabDataPayload(result.data, result.isStreamingMode);
       tab.data = payload;
       tab.isCompressed = compressed;
       tab.encoding = newEncoding;
       tab.fileFormat = result.format;
       tab.isModified = false;
+      tab.fileSize = result.fileSize;
+      tab.isStreamingMode = result.isStreamingMode;
+      tab.fileSize = result.fileSize;
+      tab.isStreamingMode = result.isStreamingMode;
       tabs = [...tabs];
       isUpdatingFromTab = true;
       dataStore.setCurrentTab(tab.id);
@@ -911,6 +910,8 @@ function requestSaveAsOptions(tab: Tab, format: 'json' | 'csv' | 'xml' | 'toon')
         format: result.format,
         encoding: result.encoding,
         binarySource: importOptions?.binarySource ?? result.binarySource ?? null,
+        fileSize: result.fileSize,
+        isStreamingMode: result.isStreamingMode,
       });
       showProgress = false;
       return true;
@@ -965,6 +966,9 @@ async function saveTabAs(tab: Tab, tabData: TableData): Promise<boolean> {
       }
       tab.fileFormat = format;
       tab.encoding = selection.encoding;
+      if (result.fileSize !== undefined) {
+        tab.fileSize = result.fileSize;
+      }
       tab.isModified = false;
       tabs = tabs;
       return true;
@@ -1000,6 +1004,9 @@ async function handleSave() {
       encoding: tab.encoding,
     });
     if (result.saved) {
+      if (result.fileSize !== undefined) {
+        tab.fileSize = result.fileSize;
+      }
       tab.isModified = false;
       tabs = tabs;
     }
@@ -1015,11 +1022,16 @@ async function handleSave() {
     if (!tab) return;
 
     try {
-      // 탭 데이터를 TableData로 변환
+      // 탭 데이터를 TableData로 변환 (레거시 지원 포함)
       let tabData: TableData;
       if (tab.isCompressed && typeof tab.data === 'string') {
+        // 레거시 압축 데이터
         tabData = decompressFromToon(tab.data);
+      } else if (tab.isStreamingMode) {
+        // 스트리밍 모드: 직접 참조
+        tabData = typeof tab.data === 'string' ? JSON.parse(tab.data) : tab.data;
       } else {
+        // 일반 모드: 복사
         tabData = typeof tab.data === 'string' 
           ? JSON.parse(tab.data) 
           : tab.data;
@@ -1327,6 +1339,8 @@ async function handleSave() {
     totalRows={tableState.totalRowCount || data.metadata.rowCount}
     searchCount={searchMatchCount}
     hasData={data.rows.length > 0 || data.columns.length > 0}
+    fileSize={activeTabId ? tabs.find(t => t.id === activeTabId)?.fileSize : undefined}
+    isStreamingMode={activeTabId ? (tabs.find(t => t.id === activeTabId)?.isStreamingMode ?? false) : false}
     duplicateInfo={tableState.duplicateInfo || null}
     on:changeEncoding={(e) => handleEncodingChangeRequest(e.detail.encoding)}
     on:findDuplicates={(e) => {

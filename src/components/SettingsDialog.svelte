@@ -16,6 +16,7 @@
     rowHeight: 32,
     transformVariableName: 'cell',
     transformArrayVariableName: 'list',
+    streamingThresholdKB: 204800,
   };
 
   $: settingsStore.subscribe((value) => {
@@ -59,7 +60,14 @@
 
 {#if isOpen}
   <div class="settings-overlay">
-    <div class="settings-dialog" role="dialog" aria-labelledby="settings-dialog-title" aria-modal="true" tabindex="-1" on:click|stopPropagation on:keydown={handleDialogKeydown}>
+    <div
+      class="settings-dialog"
+      role="button"
+      aria-labelledby="settings-dialog-title"
+      tabindex="-1"
+      on:click|stopPropagation
+      on:keydown={handleDialogKeydown}
+    >
       <div class="settings-header">
         <h2>설정</h2>
         <button class="close-btn" on:click={handleCancel} title="닫기">
@@ -188,6 +196,20 @@
             />
           </label>
           <p class="settings-description">배열 변환에서 사용할 변수명을 지정합니다. (기본: list)</p>
+        </div>
+
+        <div class="settings-group">
+          <label class="settings-label">
+            <span>스트리밍 모드 임계값 (KB)</span>
+            <input
+              type="number"
+              min="1"
+              max="10485760"
+              bind:value={settings.streamingThresholdKB}
+              class="settings-input"
+            />
+          </label>
+          <p class="settings-description">파일 크기가 이 값 이상이면 스트리밍 모드로 파싱합니다. 대용량 파일 처리 시 메모리 오류를 방지합니다. (기본: 204800KB = 200MB)</p>
         </div>
       </div>
       <div class="settings-footer">

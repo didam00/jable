@@ -15,6 +15,7 @@ export interface AppSettings {
   rowHeight: number; // 슬롯(행) 높이
   transformVariableName: string; // 단일 값 변환 변수명
   transformArrayVariableName: string; // 배열 변환 변수명
+  streamingThresholdKB: number; // 스트리밍 모드 임계값 (KB, 기본값: 204800 = 200MB)
 }
 
 const DEFAULT_SETTINGS: AppSettings = {
@@ -28,6 +29,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   rowHeight: 32,
   transformVariableName: 'cell',
   transformArrayVariableName: 'list',
+  streamingThresholdKB: 204800, // 기본값: 204800KB (200MB)
 };
 
 const SETTINGS_STORAGE_KEY = 'json-editor-settings';

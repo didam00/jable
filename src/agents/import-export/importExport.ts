@@ -2,16 +2,20 @@
  * Import/Export Agent - 파일 및 클립보드 처리
  */
 import { parseJSON, parseCSV, parseXML, exportToJSON, exportToCSV, exportToXML, type ProgressCallback, type ProgressDetails } from '../parser/parser';
+import { parseJSONStreaming, parseCSVStreaming, parseXMLStreaming } from '../parser/streamingParser';
 import { compressToToon, decompressFromToon } from '../compression/toon';
 import type { TableData } from '../store/types';
 import { isTauri } from '../../utils/isTauri';
 import { detectEncodingFromBuffer, decodeBuffer, buildFileNameForFormat, encodeBuffer } from './encoding';
+import { settingsStore } from '../settings/settings';
 
 export interface ImportResult {
   data: TableData;
   format: 'json' | 'csv' | 'xml' | 'toon';
   encoding?: string;
   binarySource?: Uint8Array;
+  fileSize?: number; // 파일 크기 (bytes)
+  isStreamingMode?: boolean; // 스트리밍 모드로 파싱되었는지 여부
 }
 
 export interface ImportOptions {
@@ -86,104 +90,204 @@ export async function importFile(
       size: fileSize,
     });
 
-    let data: TableData;
+    // 스트리밍 모드 확인 (파일 크기가 임계값 이상이면 스트리밍 모드 사용)
+    const streamingThreshold = settingsStore.get().streamingThresholdKB * 1024; // KB -> bytes
+    const shouldUseStreaming = fileSize >= streamingThreshold && fileFormat !== 'toon';
+    
+    console.log(`[importFile] 스트리밍 모드: ${shouldUseStreaming} (임계값: ${streamingThreshold} bytes, 파일 크기: ${fileSize} bytes)`);
+
+    let data: TableData | undefined;
     try {
       const createAdjustedProgress = (stageProgress: number, stageRange: [number, number]) => {
         const [start, end] = stageRange;
         return start + (stageProgress / 100) * (end - start);
       };
 
-      if (fileFormat === 'json') {
-        const isBase64Like =
-          content.trim().match(/^[A-Za-z0-9+/=]+$/) && content.length > 100;
-        if (isBase64Like) {
-          console.warn(
-            `Warning: ${fileName} looks like Base64 but has .json extension. Attempting JSON parse.`
-          );
-        }
-        const adjustedOnProgress = onProgress
-          ? (prog: number, msg: string, details?: ProgressDetails) => {
-              const adjusted = createAdjustedProgress(prog, [20, 90]);
-              const adjustedDetails = details
-                ? {
-                    ...details,
-                    stage: 'parsing' as const,
-                  }
-                : {
-                    stage: 'parsing' as const,
-                    current: 0,
-                    total: content.length,
-                    stageProgress: prog,
-                  };
-              onProgress(adjusted, msg, adjustedDetails);
+      if (shouldUseStreaming) {
+        // 스트리밍 모드
+        onProgress?.(10, '스트리밍 모드로 파싱 중...');
+        
+        try {
+          if (fileFormat === 'json') {
+            const adjustedOnProgress = onProgress
+              ? (prog: number, msg: string, details?: ProgressDetails) => {
+                  const adjusted = createAdjustedProgress(prog, [10, 90]);
+                  const adjustedDetails = details
+                    ? {
+                        ...details,
+                        stage: 'parsing' as const,
+                      }
+                    : {
+                        stage: 'parsing' as const,
+                        current: 0,
+                        total: fileSize,
+                        stageProgress: prog,
+                      };
+                  onProgress(adjusted, msg, adjustedDetails);
+                }
+              : undefined;
+            
+            // File 객체를 직접 전달
+            if (file instanceof File) {
+              console.log('[importFile] JSON 스트리밍 파싱 시작 (File 객체)');
+              data = await parseJSONStreaming(file, adjustedOnProgress);
+            } else {
+              // Tauri 경로인 경우 Uint8Array로 전달
+              console.log('[importFile] JSON 스트리밍 파싱 시작 (Uint8Array)');
+              data = await parseJSONStreaming(buffer, adjustedOnProgress);
             }
-          : undefined;
-        data = parseJSON(content, adjustedOnProgress);
-      } else if (fileFormat === 'csv') {
-        const adjustedOnProgress = onProgress
-          ? (prog: number, msg: string, details?: ProgressDetails) => {
-              const adjusted = createAdjustedProgress(prog, [20, 90]);
-              const adjustedDetails = details
-                ? {
-                    ...details,
-                    stage: 'parsing' as const,
-                  }
-                : {
-                    stage: 'parsing' as const,
-                    current: 0,
-                    total: content.length,
-                    stageProgress: prog,
-                  };
-              onProgress(adjusted, msg, adjustedDetails);
-            }
-          : undefined;
-        data = parseCSV(content, adjustedOnProgress);
-      } else if (fileFormat === 'xml') {
-        const adjustedOnProgress = onProgress
-          ? (prog: number, msg: string, details?: ProgressDetails) => {
-              const adjusted = createAdjustedProgress(prog, [20, 90]);
-              const adjustedDetails = details
-                ? {
-                    ...details,
-                    stage: 'parsing' as const,
-                  }
-                : {
-                    stage: 'parsing' as const,
-                    current: 0,
-                    total: content.length,
-                    stageProgress: prog,
-                  };
-              onProgress(adjusted, msg, adjustedDetails);
-            }
-          : undefined;
-        data = parseXML(content, adjustedOnProgress);
-      } else if (fileFormat === 'toon') {
-        onProgress?.(25, 'TOON 압축 해제 중...', {
-          stage: 'compressing',
-          current: 0,
-          total: content.length,
-          stageProgress: 0,
-        });
-        data = decompressFromToon(content, (prog, msg, details) => {
-          if (onProgress) {
-            const adjusted = createAdjustedProgress(prog, [20, 90]);
-            const adjustedDetails = details || {
-              stage: 'compressing' as const,
-              current: 0,
-              total: content.length,
-              stageProgress: prog,
-            };
-            onProgress(adjusted, msg, adjustedDetails);
+            console.log('[importFile] JSON 스트리밍 파싱 완료', { rowsCount: data.rows.length, columnsCount: data.columns.length });
+          } else if (fileFormat === 'csv') {
+          const adjustedOnProgress = onProgress
+            ? (prog: number, msg: string, details?: ProgressDetails) => {
+                const adjusted = createAdjustedProgress(prog, [10, 90]);
+                const adjustedDetails = details
+                  ? {
+                      ...details,
+                      stage: 'parsing' as const,
+                    }
+                  : {
+                      stage: 'parsing' as const,
+                      current: 0,
+                      total: fileSize,
+                      stageProgress: prog,
+                    };
+                onProgress(adjusted, msg, adjustedDetails);
+              }
+            : undefined;
+          
+          if (file instanceof File) {
+            data = await parseCSVStreaming(file, adjustedOnProgress);
+          } else {
+            data = await parseCSVStreaming(buffer, adjustedOnProgress);
           }
-        });
-        onProgress?.(90, 'TOON 압축 해제 완료', {
-          stage: 'compressing',
-          current: content.length,
-          total: content.length,
-          stageProgress: 100,
-        });
+        } else if (fileFormat === 'xml') {
+          const adjustedOnProgress = onProgress
+            ? (prog: number, msg: string, details?: ProgressDetails) => {
+                const adjusted = createAdjustedProgress(prog, [10, 90]);
+                const adjustedDetails = details
+                  ? {
+                      ...details,
+                      stage: 'parsing' as const,
+                    }
+                  : {
+                      stage: 'parsing' as const,
+                      current: 0,
+                      total: fileSize,
+                      stageProgress: prog,
+                    };
+                onProgress(adjusted, msg, adjustedDetails);
+              }
+            : undefined;
+          
+          if (file instanceof File) {
+            data = await parseXMLStreaming(file, adjustedOnProgress);
+          } else {
+            data = await parseXMLStreaming(buffer, adjustedOnProgress);
+          }
+          } else {
+            throw new Error('스트리밍 모드는 JSON, CSV, XML만 지원합니다.');
+          }
+        } catch (streamingError) {
+          const errorMessage = streamingError instanceof Error ? streamingError.message : 'Unknown error';
+          console.error('[importFile] 스트리밍 파싱 실패, 에러:', errorMessage);
+          // 스트리밍 실패 시 에러를 그대로 throw (일반 모드로 fallback하지 않음)
+          throw new Error(`스트리밍 파싱 실패 (${fileName}): ${errorMessage}. 파일이 너무 크거나 형식이 올바르지 않을 수 있습니다.`);
+        }
       } else {
-        throw new Error('지원하지 않는 파일 형식입니다.');
+        // 일반 모드 (기존 로직)
+        if (fileFormat === 'json') {
+          const isBase64Like =
+            content.trim().match(/^[A-Za-z0-9+/=]+$/) && content.length > 100;
+          if (isBase64Like) {
+            console.warn(
+              `Warning: ${fileName} looks like Base64 but has .json extension. Attempting JSON parse.`
+            );
+          }
+          const adjustedOnProgress = onProgress
+            ? (prog: number, msg: string, details?: ProgressDetails) => {
+                const adjusted = createAdjustedProgress(prog, [20, 90]);
+                const adjustedDetails = details
+                  ? {
+                      ...details,
+                      stage: 'parsing' as const,
+                    }
+                  : {
+                      stage: 'parsing' as const,
+                      current: 0,
+                      total: content.length,
+                      stageProgress: prog,
+                    };
+                onProgress(adjusted, msg, adjustedDetails);
+              }
+            : undefined;
+          data = parseJSON(content, adjustedOnProgress);
+        } else if (fileFormat === 'csv') {
+          const adjustedOnProgress = onProgress
+            ? (prog: number, msg: string, details?: ProgressDetails) => {
+                const adjusted = createAdjustedProgress(prog, [20, 90]);
+                const adjustedDetails = details
+                  ? {
+                      ...details,
+                      stage: 'parsing' as const,
+                    }
+                  : {
+                      stage: 'parsing' as const,
+                      current: 0,
+                      total: content.length,
+                      stageProgress: prog,
+                    };
+                onProgress(adjusted, msg, adjustedDetails);
+              }
+            : undefined;
+          data = parseCSV(content, adjustedOnProgress);
+        } else if (fileFormat === 'xml') {
+          const adjustedOnProgress = onProgress
+            ? (prog: number, msg: string, details?: ProgressDetails) => {
+                const adjusted = createAdjustedProgress(prog, [20, 90]);
+                const adjustedDetails = details
+                  ? {
+                      ...details,
+                      stage: 'parsing' as const,
+                    }
+                  : {
+                      stage: 'parsing' as const,
+                      current: 0,
+                      total: content.length,
+                      stageProgress: prog,
+                    };
+                onProgress(adjusted, msg, adjustedDetails);
+              }
+            : undefined;
+          data = parseXML(content, adjustedOnProgress);
+        } else if (fileFormat === 'toon') {
+          onProgress?.(25, 'TOON 압축 해제 중...', {
+            stage: 'compressing',
+            current: 0,
+            total: content.length,
+            stageProgress: 0,
+          });
+          data = decompressFromToon(content, (prog, msg, details) => {
+            if (onProgress) {
+              const adjusted = createAdjustedProgress(prog, [20, 90]);
+              const adjustedDetails = details || {
+                stage: 'compressing' as const,
+                current: 0,
+                total: content.length,
+                stageProgress: prog,
+              };
+              onProgress(adjusted, msg, adjustedDetails);
+            }
+          });
+          onProgress?.(90, 'TOON 압축 해제 완료', {
+            stage: 'compressing',
+            current: content.length,
+            total: content.length,
+            stageProgress: 100,
+          });
+        } else {
+          throw new Error('지원하지 않는 파일 형식입니다.');
+        }
       }
     } catch (parseError) {
       const errorMessage = parseError instanceof Error ? parseError.message : 'Unknown error';
@@ -198,6 +302,10 @@ export async function importFile(
       throw new Error(`파일 파싱 실패 (${fileName}): ${errorMessage}`);
     }
 
+    if (!data) {
+      throw new Error(`파일 데이터가 유효하지 않습니다 (${fileName}): 데이터가 초기화되지 않았습니다.`);
+    }
+
     onProgress?.(90, '데이터 변환 중...', {
       stage: 'converting',
       current: 0,
@@ -206,7 +314,6 @@ export async function importFile(
     });
 
     if (
-      !data ||
       !data.rows ||
       !Array.isArray(data.rows) ||
       !data.columns ||
@@ -233,7 +340,14 @@ export async function importFile(
       stageProgress: 100,
     });
 
-    return { data, format: fileFormat, encoding: appliedEncoding, binarySource: buffer };
+    return { 
+      data, 
+      format: fileFormat, 
+      encoding: appliedEncoding, 
+      binarySource: buffer,
+      fileSize,
+      isStreamingMode: shouldUseStreaming,
+    };
   } catch (error) {
     throw error;
   }
@@ -456,7 +570,7 @@ export async function saveFile(
   filePath?: string,
   fileFormat?: 'json' | 'csv' | 'xml' | 'toon',
   options?: SaveOptions
-): Promise<{ saved: boolean; filePath?: string }> {
+): Promise<{ saved: boolean; filePath?: string; fileSize?: number }> {
   if (!filePath || !fileFormat) {
     return saveFileAs(data, fileFormat || 'json', {
       defaultFileName: filePath,
@@ -470,8 +584,9 @@ export async function saveFile(
       const { writeFile } = fsModule as any;
       const content = formatData(data, fileFormat);
       const encodedContent = encodeBuffer(content, options?.encoding || 'utf-8');
+      const fileSize = encodedContent.length;
       await writeFile(filePath, encodedContent);
-      return { saved: true, filePath };
+      return { saved: true, filePath, fileSize };
     } catch (error) {
       throw new Error(`파일 저장 실패: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
@@ -487,7 +602,7 @@ export async function saveFileAs(
   data: TableData,
   format?: 'json' | 'csv' | 'xml' | 'toon',
   options?: SaveAsOptions
-): Promise<{ saved: boolean; filePath?: string }> {
+): Promise<{ saved: boolean; filePath?: string; fileSize?: number }> {
   const finalFormat = format || 'json';
   const filename = buildFileNameForFormat(options?.defaultFileName, finalFormat);
   let mimeType = '';
@@ -508,6 +623,7 @@ export async function saveFileAs(
   }
 
   const encodedContent = encodeBuffer(content, options?.encoding || 'utf-8');
+  const fileSize = encodedContent.length;
 
   if (isTauri()) {
     try {
@@ -522,7 +638,7 @@ export async function saveFileAs(
           await createDir(normalizedDirectory, { recursive: true }).catch(() => undefined);
         }
         await writeFile(targetPath, encodedContent);
-        return { saved: true, filePath: targetPath };
+        return { saved: true, filePath: targetPath, fileSize };
       }
 
       const dialogModule = await import('@tauri-apps/plugin-dialog');
@@ -539,7 +655,7 @@ export async function saveFileAs(
 
       if (filePath) {
         await writeFile(filePath, encodedContent);
-        return { saved: true, filePath };
+        return { saved: true, filePath, fileSize };
       }
       return { saved: false };
     } catch (error) {
@@ -555,7 +671,7 @@ export async function saveFileAs(
   a.download = filename;
   a.click();
   URL.revokeObjectURL(url);
-  return { saved: true };
+  return { saved: true, fileSize };
 }
 
 export async function exportFile(
